@@ -27,6 +27,10 @@ class StoreUserRequest extends FormRequest
             'is_active' => ['nullable', 'boolean'],
             'store_ids' => ['nullable', 'array'],
             'store_ids.*' => ['integer', 'exists:stores,store_id'],
+
+            'shift_name' => ['nullable', 'string', 'max:100'],
+            'shift_start' => ['nullable', 'date_format:H:i', 'required_with:shift_name,shift_end'],
+            'shift_end' => ['nullable', 'date_format:H:i', 'required_with:shift_name,shift_start', 'after:shift_start'],
         ];
     }
 }

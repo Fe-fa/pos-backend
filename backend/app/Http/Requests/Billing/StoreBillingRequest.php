@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Billing;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class StoreBillingRequest extends FormRequest
 {
@@ -17,6 +18,14 @@ class StoreBillingRequest extends FormRequest
             'store_id' => ['required', 'integer', 'exists:stores,store_id'],
             'customer_id' => ['nullable', 'integer', 'exists:customers,customer_id'],
             'notes' => ['nullable', 'string', 'max:1000'],
+            'fulfillment_status' => [
+                'nullable',
+                Rule::in(['pending', 'processing', 'shipped', 'delivered']),
+            ],
+            'fulfillment_type' => [
+                'nullable',
+                Rule::in(['walk_in_counter', 'delivery']),
+            ],
         ];
     }
 }

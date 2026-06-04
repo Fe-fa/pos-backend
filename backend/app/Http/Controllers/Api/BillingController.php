@@ -16,12 +16,59 @@ class BillingController extends Controller
 
     public function index(Request $request): JsonResponse
     {
+        // Set dynamic limit capping parameters matching your original service bounds
+        $perPage = max(1, min((int) ($request->per_page ?? 20), 100));
+        $user = $request->user();
+
+        // 1. Initialize Base Query & Metrics
+        $query = Billing::query()
+            ->with(['customer', 'store', 'user', 'payments'])
+            ->withCount('items')
+            ->withSum('items', 'quantity');
+
+        // 2. Handle Soft Deletes Query States
+        if ($request->has('with_trashed') && filter_var($request->with_trashed, FILTER_VALIDATE_BOOLEAN)) {
+            $query->withTrashed();
+        }
+
+        if ($request->has('only_trashed') && filter_var($request->only_trashed, FILTER_VALIDATE_BOOLEAN)) {
+            $query->onlyTrashed();
+        }
+
+        // 3. Apply Multi-tenant Data Separation
+        $query = $this->service->scopeAccessible($query, $user);
+
+        // 4. Conditional Filters matching your requested structural pattern
+        $query->when($request->store_id, function ($q, $storeId) use ($user) {
+                $this->service->authorizeStoreAccess($user, $storeId);
+                $q->where('store_id', $storeId);
+            })
+            ->when($request->status, function ($q, $status) {
+                $q->where('status', $status);
+            })
+            ->when($request->has('is_draft') && $request->is_draft !== '', function ($q) use ($request) {
+                $q->where('is_draft', filter_var($request->is_draft, FILTER_VALIDATE_BOOLEAN));
+            })
+            ->when($request->fulfillment_status, function ($q, $fulfillmentStatus) {
+                $q->where('fulfillment_status', $fulfillmentStatus);
+            })
+            ->when($request->fulfillment_type, function ($q, $fulfillmentType) {
+                $q->where('fulfillment_type', $fulfillmentType);
+            })
+            ->orderByDesc('billing_id'); // Match your original table sort tracking rules
+
+        // 5. Execute core metadata tracking engine page query
+        $billings = $query->paginate($perPage);
+
+        // 6. Return response explicitly structured to fit matching target schema
         return response()->json([
-            'message' => 'Billings retrieved successfully.',
-            'data' => $this->service->paginate(
-                $request->user(),
-                $request->only('store_id', 'status', 'is_draft', 'per_page', 'with_trashed', 'only_trashed')
-            ),
+            'data' => $billings->items(),
+            'meta' => [
+                'current_page' => $billings->currentPage(),
+                'last_page'    => $billings->lastPage(),
+                'per_page'     => $billings->perPage(),
+                'total'        => $billings->total(),
+            ],
         ]);
     }
 
@@ -35,12 +82,12 @@ class BillingController extends Controller
 
     public function show($id): JsonResponse
     {
-        $billing = Billing::find($id);
+        $billing = Billing::withTrashed()->find($id);
 
         if (!$billing) {
             return response()->json([
                 'message' => "Billing record #{$id} was not found in our system.",
-                'data' => null
+                'data' => null,
             ], 404);
         }
 
@@ -52,12 +99,12 @@ class BillingController extends Controller
 
     public function update(UpdateBillingRequest $request, $id): JsonResponse
     {
-        $billing = Billing::find($id);
+        $billing = Billing::withTrashed()->find($id);
 
         if (!$billing) {
             return response()->json([
                 'message' => "Update failed: Billing record #{$id} does not exist.",
-                'debug_info' => 'Check if the record was deleted or if the database was refreshed.'
+                'debug_info' => 'Check if the record was deleted or if the database was refreshed.',
             ], 404);
         }
 

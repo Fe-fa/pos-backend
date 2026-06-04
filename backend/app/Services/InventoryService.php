@@ -13,7 +13,7 @@ class InventoryService
 {
     public function paginate(User $user, array $filters = []): LengthAwarePaginator
     {
-        $perPage = (int) ($filters['per_page'] ?? 15);
+        $perPage = (int) ($filters['per_page'] ?? 20);
 
         $query = Inventory::query()
             ->with(['store', 'product.category'])
@@ -50,7 +50,7 @@ class InventoryService
 
     public function paginateHistory(User $user, array $filters = []): LengthAwarePaginator
     {
-        $perPage = (int) ($filters['per_page'] ?? 25);
+        $perPage = (int) ($filters['per_page'] ?? 20);
 
         $query = InventoryHistory::query()
             ->with(['store', 'product', 'user'])

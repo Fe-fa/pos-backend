@@ -41,30 +41,50 @@ class CustomerController extends Controller
         $user = $request->user();
         $perPage = max(1, min((int) $request->get('per_page', 10), 100));
 
-        $q = Customer::query()
-            ->orderByDesc('customer_id');
+        // Dynamically compute the cumulative balance from unpaid bills
+        $query = Customer::query()
+            ->withSum(['billings as dynamic_balance' => function ($subQuery) {
+                $subQuery->where('status', '!=', 'paid');
+            }], 'balance_due');
 
         if (!$user->isAdmin()) {
-            $q->whereIn('store_id', $this->allowedStoreIds($user));
+            $query->whereIn('store_id', $this->allowedStoreIds($user));
         }
 
         if ($request->filled('store_id')) {
             $this->authorizeStoreAccess($user, $request->store_id);
-            $q->where('store_id', $request->store_id);
+            $query->where('store_id', $request->store_id);
         }
 
-        if ($request->filled('search')) {
-            $s = trim((string) $request->search);
+        // Search modifier mapping
+        $query->when($request->search, function ($q, $search) {
+            $s = trim((string) $search);
             $q->where(function ($w) use ($s) {
                 $w->where('full_name', 'like', "%{$s}%")
                     ->orWhere('phone', 'like', "%{$s}%")
                     ->orWhere('email', 'like', "%{$s}%");
             });
-        }
+        });
+
+        $query->orderByDesc('customer_id');
+
+        $customers = $query->paginate($perPage);
+
+        // Format computed properties over items collection loop directly
+        $formattedItems = collect($customers->items())->map(function (Customer $customer) {
+            $customer->current_balance = round((float) ($customer->dynamic_balance ?? 0.00), 2);
+            unset($customer->dynamic_balance);
+            return $customer;
+        });
 
         return response()->json([
-            'message' => 'Customers retrieved successfully.',
-            'data' => $q->simplePaginate($perPage)->withQueryString(),
+            'data' => $formattedItems,
+            'meta' => [
+                'current_page' => $customers->currentPage(),
+                'last_page'    => $customers->lastPage(),
+                'per_page'     => $customers->perPage(),
+                'total'        => $customers->total(),
+            ],
         ]);
     }
 
@@ -73,6 +93,7 @@ class CustomerController extends Controller
         $this->authorizeStoreAccess($request->user(), $request->validated('store_id'));
 
         $customer = Customer::create($request->validated());
+        $customer->current_balance = 0.00;
 
         return response()->json([
             'message' => 'Customer created successfully.',
@@ -84,9 +105,19 @@ class CustomerController extends Controller
     {
         $this->authorizeStoreAccess(request()->user(), $customer->store_id);
 
+        // Load dynamic balance metrics alongside relations count matching current balances
+        $customer->loadSum(['billings as dynamic_balance' => function ($query) {
+            $query->where('status', '!=', 'paid');
+        }], 'balance_due');
+
+        $customer->loadCount('billings');
+        
+        $customer->current_balance = round((float) ($customer->dynamic_balance ?? 0.00), 2);
+        unset($customer->dynamic_balance);
+
         return response()->json([
             'message' => 'Customer retrieved successfully.',
-            'data' => $customer->loadCount('billings'),
+            'data' => $customer,
         ]);
     }
 
@@ -97,9 +128,18 @@ class CustomerController extends Controller
 
         $customer->update($request->validated());
 
+        $updatedCustomer = $customer->fresh();
+        
+        $updatedCustomer->loadSum(['billings as dynamic_balance' => function ($query) {
+            $query->where('status', '!=', 'paid');
+        }], 'balance_due');
+
+        $updatedCustomer->current_balance = round((float) ($updatedCustomer->dynamic_balance ?? 0.00), 2);
+        unset($updatedCustomer->dynamic_balance);
+
         return response()->json([
             'message' => 'Customer updated successfully.',
-            'data' => $customer->fresh(),
+            'data' => $updatedCustomer,
         ]);
     }
 

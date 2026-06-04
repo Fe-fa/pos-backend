@@ -19,6 +19,9 @@ class AuthService
             'password' => $data['password'],
             'role' => User::ROLE_CASHIER,
             'default_store_id' => null,
+            'shift_name' => null,
+            'shift_start' => null,
+            'shift_end' => null,
             'is_active' => true,
             'is_verified' => false,
             'email_verified_at' => app()->environment('local') ? now() : null,
@@ -78,9 +81,14 @@ class AuthService
     public function profile(User $user): array
     {
         $user->loadMissing(['defaultStore', 'stores']);
+
         $hasStoreAssignment = $user->isAdmin()
             || (int) $user->stores->count() > 0
             || ! empty($user->default_store_id);
+
+        $shiftStart = $this->normalizeTime($user->shift_start);
+        $shiftEnd = $this->normalizeTime($user->shift_end);
+        $shiftLabel = $this->buildShiftLabel($user->shift_name, $shiftStart, $shiftEnd);
 
         return [
             'user_id' => $user->user_id,
@@ -96,6 +104,12 @@ class AuthService
             'email_verified' => $user->hasVerifiedEmail(),
             'default_store_id' => $user->default_store_id,
             'has_store_assignment' => $hasStoreAssignment,
+
+            'shift_name' => $user->shift_name,
+            'shift_start' => $shiftStart,
+            'shift_end' => $shiftEnd,
+            'shift_label' => $shiftLabel,
+
             'default_store' => $user->defaultStore ? [
                 'store_id' => $user->defaultStore->store_id,
                 'store_name' => $user->defaultStore->store_name,
@@ -105,6 +119,7 @@ class AuthService
                 'telephone' => $user->defaultStore->telephone ?? $user->defaultStore->phone ?? $user->defaultStore->phone_number,
                 'email_address' => $user->defaultStore->email_address ?? $user->defaultStore->email,
             ] : null,
+
             'stores' => $user->stores->map(fn ($store) => [
                 'store_id' => $store->store_id,
                 'store_name' => $store->store_name,
@@ -114,8 +129,39 @@ class AuthService
                 'telephone' => $store->telephone ?? $store->phone ?? $store->phone_number,
                 'email_address' => $store->email_address ?? $store->email,
             ])->values()->all(),
+
             'roles' => $user->getRoleNames()->values()->all(),
             'permissions' => $user->getAllPermissions()->pluck('name')->values()->all(),
         ];
+    }
+
+    private function normalizeTime($value): ?string
+    {
+        if (empty($value)) {
+            return null;
+        }
+
+        $value = (string) $value;
+
+        return strlen($value) >= 5 ? substr($value, 0, 5) : $value;
+    }
+
+    private function buildShiftLabel(?string $name, ?string $start, ?string $end): ?string
+    {
+        $name = trim((string) $name);
+
+        if ($name !== '' && $start && $end) {
+            return "{$name} ({$start} - {$end})";
+        }
+
+        if ($name !== '') {
+            return $name;
+        }
+
+        if ($start && $end) {
+            return "{$start} - {$end}";
+        }
+
+        return null;
     }
 }

@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
@@ -33,6 +34,9 @@ class User extends Authenticatable implements MustVerifyEmail
         'password',
         'role',
         'default_store_id',
+        'shift_name',
+        'shift_start',
+        'shift_end',
         'verification_code',
         'verification_expiry',
         'is_active',
@@ -48,6 +52,8 @@ class User extends Authenticatable implements MustVerifyEmail
 
     protected $appends = [
         'full_name',
+        'shift_label',
+        'sales_today',
     ];
 
     protected $casts = [
@@ -84,9 +90,65 @@ class User extends Authenticatable implements MustVerifyEmail
         return $this->hasMany(Billing::class, 'user_id', 'user_id');
     }
 
+    public function payments(): HasManyThrough
+    {
+        return $this->hasManyThrough(
+            Payment::class,
+            Billing::class,
+            'user_id',     // Foreign key on billing table...
+            'billing_id',  // Foreign key on payments table...
+            'user_id',     // Local key on users table...
+            'billing_id'   // Local key on billing table...
+        );
+    }
+
     public function getFullNameAttribute(): string
     {
         return trim("{$this->first_name} {$this->last_name}");
+    }
+
+    public function getShiftLabelAttribute(): ?string
+    {
+        $name = trim((string) $this->shift_name);
+        $start = $this->normalizeTime($this->shift_start);
+        $end = $this->normalizeTime($this->shift_end);
+
+        if ($name !== '' && $start && $end) {
+            return "{$name} ({$start} - {$end})";
+        }
+
+        if ($name !== '') {
+            return $name;
+        }
+
+        if ($start && $end) {
+            return "{$start} - {$end}";
+        }
+
+        return null;
+    }
+
+    public function getSalesTodayAttribute(): float
+    {
+        // If already selected from query, use it directly.
+        if (array_key_exists('sales_today', $this->attributes)) {
+            return round((float) $this->attributes['sales_today'], 2);
+        }
+
+        return round((float) $this->payments()
+            ->whereDate('payments.payment_date', now()->toDateString())
+            ->sum('payments.amount_received'), 2);
+    }
+
+    private function normalizeTime($value): ?string
+    {
+        if (empty($value)) {
+            return null;
+        }
+
+        $value = (string) $value;
+
+        return strlen($value) >= 5 ? substr($value, 0, 5) : $value;
     }
 
     public function scopeActive($query)
@@ -100,7 +162,6 @@ class User extends Authenticatable implements MustVerifyEmail
             return true;
         }
 
-        // Spatie role check
         try {
             return $this->hasRole(self::ROLE_ADMIN, 'sanctum')
                 || $this->getRoleNames()->contains(self::ROLE_ADMIN);
@@ -108,6 +169,7 @@ class User extends Authenticatable implements MustVerifyEmail
             return false;
         }
     }
+
     public function isManager(): bool
     {
         if (($this->role ?? null) === self::ROLE_MANAGER) {

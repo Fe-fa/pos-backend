@@ -4,7 +4,6 @@ namespace App\Services;
 
 use App\Models\Billing;
 use App\Models\User;
-use Illuminate\Contracts\Pagination\Paginator as PaginatorContract;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 
@@ -17,7 +16,8 @@ class BillingService
     ) {
     }
 
-    private function allowedStoreIds(User $user)
+    // Public so the controller can load store IDs for tenant matching
+    public function allowedStoreIds(User $user)
     {
         return $user->stores()
             ->pluck('stores.store_id')
@@ -27,7 +27,8 @@ class BillingService
             ->values();
     }
 
-    private function scopeAccessible(Builder $query, User $user): Builder
+    // Public so the controller can securely append access bounds to the base query
+    public function scopeAccessible(Builder $query, User $user): Builder
     {
         if ($user->isAdmin()) {
             return $query;
@@ -44,7 +45,8 @@ class BillingService
             ->where('user_id', $user->user_id);
     }
 
-    private function authorizeStoreAccess(User $user, int|string|null $storeId): void
+    // Public so the controller can evaluate explicit store parameters
+    public function authorizeStoreAccess(User $user, int|string|null $storeId): void
     {
         if (!$storeId || $user->isAdmin()) {
             return;
@@ -59,7 +61,7 @@ class BillingService
         }
     }
 
-    private function authorizeBillingAccess(Billing $billing, ?User $actor = null): void
+    public function authorizeBillingAccess(Billing $billing, ?User $actor = null): void
     {
         $actor = $actor ?: auth()->user();
 
@@ -95,41 +97,6 @@ class BillingService
         }
     }
 
-    public function paginate(User $user, array $filters = []): PaginatorContract
-    {
-        $perPage = max(1, min((int) ($filters['per_page'] ?? 10), 100));
-
-        $query = Billing::query()
-            ->with(['customer', 'store', 'user', 'payments'])
-            ->withCount('items')
-            ->orderByDesc('billing_id');
-
-        if (!empty($filters['with_trashed']) && filter_var($filters['with_trashed'], FILTER_VALIDATE_BOOLEAN)) {
-            $query->withTrashed();
-        }
-
-        if (!empty($filters['only_trashed']) && filter_var($filters['only_trashed'], FILTER_VALIDATE_BOOLEAN)) {
-            $query->onlyTrashed();
-        }
-
-        $query = $this->scopeAccessible($query, $user);
-
-        if (!empty($filters['store_id'])) {
-            $this->authorizeStoreAccess($user, $filters['store_id']);
-            $query->where('store_id', $filters['store_id']);
-        }
-
-        if (!empty($filters['status'])) {
-            $query->where('status', $filters['status']);
-        }
-
-        if (array_key_exists('is_draft', $filters)) {
-            $query->where('is_draft', filter_var($filters['is_draft'], FILTER_VALIDATE_BOOLEAN));
-        }
-
-        return $query->simplePaginate($perPage)->withQueryString();
-    }
-
     public function createDraft(User $user, array $data): Billing
     {
         $this->authorizeStoreAccess($user, $data['store_id']);
@@ -148,6 +115,8 @@ class BillingService
             'is_draft' => true,
             'billing_date' => now(),
             'notes' => $data['notes'] ?? null,
+            'fulfillment_status' => $data['fulfillment_status'] ?? 'pending',
+            'fulfillment_type' => $data['fulfillment_type'] ?? 'walk_in_counter',
         ]);
 
         $this->auditLogService->log(
@@ -167,6 +136,8 @@ class BillingService
         $this->authorizeBillingAccess($billing);
 
         $billing->load(['customer', 'store', 'user', 'items.product.category', 'payments']);
+        $billing->loadCount('items');
+        $billing->loadSum('items', 'quantity');
 
         $this->auditLogService->log(
             'billing.view',
@@ -193,6 +164,12 @@ class BillingService
             'notes' => array_key_exists('notes', $data)
                 ? $data['notes']
                 : $billing->notes,
+            'fulfillment_status' => array_key_exists('fulfillment_status', $data)
+                ? $data['fulfillment_status']
+                : $billing->fulfillment_status,
+            'fulfillment_type' => array_key_exists('fulfillment_type', $data)
+                ? $data['fulfillment_type']
+                : $billing->fulfillment_type,
         ]);
 
         $this->auditLogService->log(
@@ -204,7 +181,7 @@ class BillingService
             $billing->store_id
         );
 
-        return $billing->fresh()->load(['customer', 'store', 'items.product']);
+        return $billing->fresh()->load(['customer', 'store', 'items.product', 'payments']);
     }
 
     public function recalculateTotals(Billing $billing): Billing

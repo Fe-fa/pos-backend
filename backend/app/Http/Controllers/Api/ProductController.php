@@ -16,16 +16,51 @@ class ProductController extends Controller
         private readonly ProductService $service
     ) {}
 
-    public function index(Request $request): JsonResponse
-    {
-        return response()->json([
-            'message' => 'Products retrieved successfully.',
-            'data' => $this->service->paginate(
-                $request->user(),
-                $request->only('store_id', 'search', 'category_id', 'is_active', 'per_page')
-            ),
-        ]);
+public function index(Request $request): JsonResponse
+{
+    $perPage = (int) ($request->per_page ?? 12);
+    $user = $request->user();
+
+    $query = Product::query()
+        ->with(['category'])
+        ->withCount('inventories')
+        ->withSum('inventories as total_stock', 'quantity');
+
+    if (!$user->isAdmin()) {
+        $query->whereIn('store_id', $this->service->allowedStoreIds($user));
     }
+    // 3. Conditional Filtering matching your exact format syntax
+    $query->when($request->store_id, function ($q, $storeId) use ($user) {
+            $this->service->authorizeStoreAccess($user, $storeId);
+            $q->where('store_id', $storeId);
+        })
+        ->when($request->search, function ($q, $search) {
+            $search = trim($search);
+            $q->where(function ($subQuery) use ($search) {
+                $subQuery->where('product_name', 'like', "%{$search}%")
+                         ->orWhere('sku', 'like', "%{$search}%");
+            });
+        })
+        ->when($request->category_id, function ($q, $categoryId) {
+            $q->where('category_id', (int) $categoryId);
+        })
+        ->when($request->has('is_active') && $request->is_active !== '', function ($q) use ($request) {
+            $q->where('is_active', filter_var($request->is_active, FILTER_VALIDATE_BOOLEAN));
+        })
+        ->orderByDesc('product_id'); // Match your original latest sorting
+
+    
+    $products = $query->paginate($perPage);
+    return response()->json([
+        'data' => $products->items(),
+        'meta' => [
+            'current_page' => $products->currentPage(),
+            'last_page'    => $products->lastPage(),
+            'per_page'     => $products->perPage(),
+            'total'        => $products->total(),
+        ],
+    ]);
+}
 
     public function store(StoreProductRequest $request): JsonResponse
     {

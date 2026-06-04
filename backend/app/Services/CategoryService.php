@@ -4,12 +4,10 @@ namespace App\Services;
 
 use App\Models\Category;
 use App\Models\User;
-use Illuminate\Contracts\Pagination\Paginator;
-
 
 class CategoryService
 {
-    private function allowedStoreIds(User $user)
+    public function allowedStoreIds(User $user)
     {
         return $user->stores()
             ->pluck('stores.store_id')
@@ -18,8 +16,7 @@ class CategoryService
             ->unique()
             ->values();
     }
-
-    private function authorizeStoreAccess(User $user, int|string|null $storeId): void
+    public function authorizeStoreAccess(User $user, int|string|null $storeId): void
     {
         if (!$storeId || $user->isAdmin()) {
             return;
@@ -35,33 +32,6 @@ class CategoryService
             ], 403));
         }
     }
-
-    public function paginate(User $user, array $filters = []): Paginator
-    {
-        $perPage = (int) ($filters['per_page'] ?? 12);
-
-        $query = Category::query()
-            ->withCount('products')
-            ->orderBy('category_name');
-
-        if (!$user->isAdmin()) {
-            $query->whereIn('store_id', $this->allowedStoreIds($user));
-        }
-
-        if (!empty($filters['store_id'])) {
-            $this->authorizeStoreAccess($user, $filters['store_id']);
-            $query->where('store_id', $filters['store_id']);
-        }
-        
-        if (!empty($filters['search'])) {
-            $search = trim($filters['search']);
-            $query->where('category_name', 'like', "%{$search}%");
-        }
-
-        return $query->simplePaginate($perPage);
-        
-    }
-
     public function create(User $user, array $data): Category
     {
         $this->authorizeStoreAccess($user, $data['store_id']);

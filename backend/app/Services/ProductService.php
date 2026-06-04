@@ -5,13 +5,13 @@ namespace App\Services;
 use App\Models\Category;
 use App\Models\Product;
 use App\Models\User;
-use Illuminate\Contracts\Pagination\Paginator;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 
 class ProductService
 {
-    private function allowedStoreIds(User $user)
+    // Changed to public so the Controller can read it for filtering
+    public function allowedStoreIds(User $user)
     {
         return $user->stores()
             ->pluck('stores.store_id')
@@ -21,7 +21,8 @@ class ProductService
             ->values();
     }
 
-    private function authorizeStoreAccess(User $user, int|string|null $storeId): void
+    // Changed to public so the Controller can check store access rights
+    public function authorizeStoreAccess(User $user, int|string|null $storeId): void
     {
         if (!$storeId || $user->isAdmin()) {
             return;
@@ -36,48 +37,6 @@ class ProductService
                 'message' => 'You are not allowed to access this store.',
             ], 403));
         }
-    }
-
-    public function paginate(User $user, array $filters = []): Paginator
-    {
-        $perPage = (int) ($filters['per_page'] ?? 24);
-
-        $query = Product::query()
-            ->with(['category'])
-            ->withCount('inventories')
-            ->withSum('inventories as total_stock', 'quantity')
-            ->orderByDesc('product_id');
-
-        if (!$user->isAdmin()) {
-            $query->whereIn('store_id', $this->allowedStoreIds($user));
-        }
-
-        if (!empty($filters['store_id'])) {
-            $this->authorizeStoreAccess($user, $filters['store_id']);
-            $query->where('store_id', $filters['store_id']);
-        }
-
-        if (!empty($filters['search'])) {
-            $search = trim($filters['search']);
-
-            $query->where(function ($q) use ($search) {
-                $q->where('product_name', 'like', "%{$search}%")
-                  ->orWhere('sku', 'like', "%{$search}%");
-            });
-        }
-
-        if (!empty($filters['category_id'])) {
-            $query->where('category_id', (int) $filters['category_id']);
-        }
-
-        if (array_key_exists('is_active', $filters) && $filters['is_active'] !== '') {
-            $query->where(
-                'is_active',
-                filter_var($filters['is_active'], FILTER_VALIDATE_BOOLEAN)
-            );
-        }
-
-        return $query->simplePaginate($perPage);
     }
 
     public function create(User $user, array $data): Product

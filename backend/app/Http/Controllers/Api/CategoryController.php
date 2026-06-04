@@ -18,12 +18,36 @@ class CategoryController extends Controller
 
     public function index(Request $request): JsonResponse
     {
+        $perPage = (int) ($request->per_page ?? 12);
+        $user = $request->user();
+
+        $query = Category::query()
+            ->withCount('products');
+
+        if (!$user->isAdmin()) {
+            $query->whereIn('categories.store_id', $this->service->allowedStoreIds($user));
+        }
+
+        $query->when($request->store_id, function ($q, $storeId) use ($user) {
+                $this->service->authorizeStoreAccess($user, $storeId);
+                $q->where('categories.store_id', $storeId);
+            })
+            ->when($request->search, function ($q, $search) {
+                $search = trim($search);
+                $q->where('categories.category_name', 'like', "%{$search}%");
+            })
+            ->orderBy('categories.category_name'); 
+
+        $categories = $query->paginate($perPage);
+
         return response()->json([
-            'message' => 'Categories retrieved successfully.',
-            'data' => $this->service->paginate(
-                $request->user(),
-                $request->only('store_id', 'search', 'per_page')
-            ),
+            'data' => $categories->items(),
+            'meta' => [
+                'current_page' => $categories->currentPage(),
+                'last_page'    => $categories->lastPage(),
+                'per_page'     => $categories->perPage(),
+                'total'        => $categories->total(),
+            ],
         ]);
     }
 

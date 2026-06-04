@@ -6,7 +6,9 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\User\StoreAssignmentRequest;
 use App\Http\Requests\User\StoreUserRequest;
 use App\Http\Requests\User\UpdateUserRequest;
+use App\Models\Payment;
 use App\Models\User;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
@@ -16,24 +18,33 @@ class UserController extends Controller
     public function index(Request $request): JsonResponse
     {
         $actor = $request->user();
-        $query = User::query()->with(['defaultStore', 'stores'])->orderByDesc('user_id');
+        $requestedStoreId = $this->requestedStoreId($request);
+
+        $query = User::query()
+            ->select('users.*')
+            ->selectSub($this->todayPaymentsSubQuery($actor, $requestedStoreId), 'sales_today')
+            ->with(['defaultStore', 'stores'])
+            ->orderByDesc('user_id');
 
         if ($request->filled('search')) {
             $search = trim((string) $request->input('search'));
+
             $query->where(function ($builder) use ($search) {
                 $builder->where('first_name', 'like', "%{$search}%")
                     ->orWhere('last_name', 'like', "%{$search}%")
                     ->orWhere('username', 'like', "%{$search}%")
-                    ->orWhere('email', 'like', "%{$search}%");
+                    ->orWhere('email', 'like', "%{$search}%")
+                    ->orWhere('shift_name', 'like', "%{$search}%");
             });
         }
 
         if ($request->filled('role')) {
-            $query->where('role', $request->string('role'));
+            $query->where('role', (string) $request->input('role'));
         }
 
         if ($actor->isManager()) {
             $allowedStoreIds = $this->allowedStoreIds($actor);
+
             $query->where('role', User::ROLE_CASHIER)
                 ->where(function ($builder) use ($allowedStoreIds) {
                     $builder->whereIn('default_store_id', $allowedStoreIds)
@@ -41,15 +52,16 @@ class UserController extends Controller
                 });
         }
 
-        if ($request->filled('store_id')) {
-            $storeId = (int) $request->input('store_id');
-            if ($actor->isManager() && ! in_array($storeId, $this->allowedStoreIds($actor), true)) {
-                return response()->json(['message' => 'You do not have access to this store.'], 403);
+        if ($requestedStoreId !== null) {
+            if ($actor->isManager() && ! in_array($requestedStoreId, $this->allowedStoreIds($actor), true)) {
+                return response()->json([
+                    'message' => 'You do not have access to this store.',
+                ], 403);
             }
 
-            $query->where(function ($builder) use ($storeId) {
-                $builder->where('default_store_id', $storeId)
-                    ->orWhereHas('stores', fn ($relation) => $relation->where('stores.store_id', $storeId));
+            $query->where(function ($builder) use ($requestedStoreId) {
+                $builder->where('default_store_id', $requestedStoreId)
+                    ->orWhereHas('stores', fn ($relation) => $relation->where('stores.store_id', $requestedStoreId));
             });
         }
 
@@ -62,12 +74,15 @@ class UserController extends Controller
             }
 
             if ($request->input('assigned') === 'unassigned') {
-                $query->whereNull('default_store_id')->whereDoesntHave('stores');
+                $query->whereNull('default_store_id')
+                    ->whereDoesntHave('stores');
             }
         }
 
         return response()->json([
-            'data' => $query->get()->map(fn (User $user) => $this->transformUser($user))->values(),
+            'data' => $query->get()
+                ->map(fn (User $user) => $this->transformUser($user, $actor, $requestedStoreId))
+                ->values(),
         ]);
     }
 
@@ -90,7 +105,14 @@ class UserController extends Controller
 
         $storeIds = Arr::pull($data, 'store_ids', []);
         $defaultStoreId = Arr::get($data, 'default_store_id');
+
         $this->assertStoreScope($actor, $storeIds);
+
+        if (($data['role'] ?? null) === User::ROLE_ADMIN) {
+            $data['shift_name'] = null;
+            $data['shift_start'] = null;
+            $data['shift_end'] = null;
+        }
 
         $user = User::create([
             ...$data,
@@ -105,20 +127,26 @@ class UserController extends Controller
 
         return response()->json([
             'message' => 'User created successfully.',
-            'user' => $this->transformUser($user->fresh(['defaultStore', 'stores'])),
+            'user' => $this->transformUser(
+                $user->fresh(['defaultStore', 'stores']),
+                $actor
+            ),
         ], 201);
     }
 
     public function show(Request $request, User $user): JsonResponse
     {
-        if (! $this->canManageUser($request->user(), $user)) {
+        $actor = $request->user();
+        $requestedStoreId = $this->requestedStoreId($request);
+
+        if (! $this->canManageUser($actor, $user)) {
             return response()->json(['message' => 'You do not have access to this user.'], 403);
         }
 
         $user->load(['defaultStore', 'stores']);
 
         return response()->json([
-            'user' => $this->transformUser($user),
+            'user' => $this->transformUser($user, $actor, $requestedStoreId),
         ]);
     }
 
@@ -145,7 +173,14 @@ class UserController extends Controller
             if ($actor->isManager() && $data['role'] !== User::ROLE_CASHIER) {
                 return response()->json(['message' => 'Managers can update cashiers only.'], 403);
             }
+
             $user->syncRoles([$data['role']]);
+        }
+
+        if (($data['role'] ?? $user->role) === User::ROLE_ADMIN) {
+            $data['shift_name'] = null;
+            $data['shift_start'] = null;
+            $data['shift_end'] = null;
         }
 
         if ($storeIds !== null) {
@@ -161,7 +196,10 @@ class UserController extends Controller
 
         return response()->json([
             'message' => 'User updated successfully.',
-            'user' => $this->transformUser($user->fresh(['defaultStore', 'stores'])),
+            'user' => $this->transformUser(
+                $user->fresh(['defaultStore', 'stores']),
+                $actor
+            ),
         ]);
     }
 
@@ -178,27 +216,37 @@ class UserController extends Controller
         ]);
     }
 
-public function syncStores(StoreAssignmentRequest $request, User $user): JsonResponse
-{
-    $actor = $request->user();
-    if (! $actor->isAdmin()) {
-        if (! $actor->hasPermissionTo('stores.assign')) {
-            return response()->json(['message' => 'You do not have permission to assign stores.'], 403);
-        }
-        if (! $this->canManageUser($actor, $user)) {
-            return response()->json(['message' => 'You are not authorized to manage this user.'], 403);
-        }
-    }
-    $storeIds = array_values(array_unique($request->validated('store_ids')));
-    $this->assertStoreScope($actor, $storeIds);
-    $this->syncUserStores($user, $storeIds);
-    $user->update(['default_store_id' => $storeIds[0] ?? null]);
+    public function syncStores(StoreAssignmentRequest $request, User $user): JsonResponse
+    {
+        $actor = $request->user();
 
-    return response()->json([
-        'message' => 'Store assignment updated successfully.',
-        'user' => $this->transformUser($user->fresh(['defaultStore', 'stores'])),
-    ]);
-}
+        if (! $actor->isAdmin()) {
+            if (! $actor->hasPermissionTo('stores.assign')) {
+                return response()->json(['message' => 'You do not have permission to assign stores.'], 403);
+            }
+
+            if (! $this->canManageUser($actor, $user)) {
+                return response()->json(['message' => 'You are not authorized to manage this user.'], 403);
+            }
+        }
+
+        $storeIds = array_values(array_unique($request->validated('store_ids')));
+
+        $this->assertStoreScope($actor, $storeIds);
+        $this->syncUserStores($user, $storeIds);
+
+        $user->update([
+            'default_store_id' => $storeIds[0] ?? null,
+        ]);
+
+        return response()->json([
+            'message' => 'Store assignment updated successfully.',
+            'user' => $this->transformUser(
+                $user->fresh(['defaultStore', 'stores']),
+                $actor
+            ),
+        ]);
+    }
 
     private function canManageUser(User $actor, User $target): bool
     {
@@ -220,12 +268,15 @@ public function syncStores(StoreAssignmentRequest $request, User $user): JsonRes
             return true;
         }
 
-        return $target->stores()->whereIn('stores.store_id', $allowedStoreIds)->exists();
+        return $target->stores()
+            ->whereIn('stores.store_id', $allowedStoreIds)
+            ->exists();
     }
 
     private function allowedStoreIds(User $actor): array
     {
-        return $actor->stores()->pluck('stores.store_id')
+        return $actor->stores()
+            ->pluck('stores.store_id')
             ->push($actor->default_store_id)
             ->filter()
             ->map(fn ($id) => (int) $id)
@@ -259,9 +310,93 @@ public function syncStores(StoreAssignmentRequest $request, User $user): JsonRes
         $user->stores()->sync($payload);
     }
 
-    private function transformUser(User $user): array
+    private function requestedStoreId(Request $request): ?int
+    {
+        return $request->filled('store_id')
+            ? (int) $request->input('store_id')
+            : null;
+    }
+
+    private function todayPaymentsSubQuery(User $actor, ?int $storeId = null): Builder
+    {
+        $query = Payment::query()
+            ->selectRaw('COALESCE(SUM(payments.amount_received), 0)')
+            ->join('billing as billing_for_payments', 'billing_for_payments.billing_id', '=', 'payments.billing_id')
+            ->whereColumn('billing_for_payments.user_id', 'users.user_id')
+            ->whereDate('payments.payment_date', today());
+
+        if ($storeId !== null) {
+            $query->where('billing_for_payments.store_id', $storeId);
+
+            return $query;
+        }
+
+        if (! $actor->isAdmin()) {
+            $query->whereIn('billing_for_payments.store_id', $this->allowedStoreIds($actor));
+        }
+
+        return $query;
+    }
+
+    private function resolveSalesToday(User $user, ?User $actor = null, ?int $storeId = null): float
+    {
+        if (array_key_exists('sales_today', $user->getAttributes())) {
+            return round((float) $user->getAttribute('sales_today'), 2);
+        }
+
+        $query = Payment::query()
+            ->selectRaw('COALESCE(SUM(payments.amount_received), 0)')
+            ->join('billing as billing_for_payments', 'billing_for_payments.billing_id', '=', 'payments.billing_id')
+            ->where('billing_for_payments.user_id', $user->user_id)
+            ->whereDate('payments.payment_date', today());
+
+        if ($storeId !== null) {
+            $query->where('billing_for_payments.store_id', $storeId);
+        } elseif ($actor && ! $actor->isAdmin()) {
+            $query->whereIn('billing_for_payments.store_id', $this->allowedStoreIds($actor));
+        }
+
+        return round((float) $query->value(\Illuminate\Support\Facades\DB::raw('COALESCE(SUM(payments.amount_received), 0)')), 2);
+    }
+
+    private function normalizeTime($value): ?string
+    {
+        if (empty($value)) {
+            return null;
+        }
+
+        $value = (string) $value;
+
+        return strlen($value) >= 5 ? substr($value, 0, 5) : $value;
+    }
+
+    private function buildShiftLabel(?string $name, ?string $start, ?string $end): ?string
+    {
+        $name = trim((string) $name);
+
+        if ($name !== '' && $start && $end) {
+            return "{$name} ({$start} - {$end})";
+        }
+
+        if ($name !== '') {
+            return $name;
+        }
+
+        if ($start && $end) {
+            return "{$start} - {$end}";
+        }
+
+        return null;
+    }
+
+    private function transformUser(User $user, ?User $actor = null, ?int $storeId = null): array
     {
         $user->loadMissing(['defaultStore', 'stores']);
+
+        $shiftStart = $this->normalizeTime($user->shift_start);
+        $shiftEnd = $this->normalizeTime($user->shift_end);
+        $shiftLabel = $this->buildShiftLabel($user->shift_name, $shiftStart, $shiftEnd);
+        $salesToday = $this->resolveSalesToday($user, $actor, $storeId);
 
         return [
             'user_id' => $user->user_id,
@@ -273,19 +408,42 @@ public function syncStores(StoreAssignmentRequest $request, User $user): JsonRes
             'phone' => $user->phone,
             'role' => $user->role,
             'is_active' => $user->is_active,
+
+            'shift_name' => $user->shift_name,
+            'shift_start' => $shiftStart,
+            'shift_end' => $shiftEnd,
+            'shift_label' => $shiftLabel,
+            'shift' => $shiftLabel ? [
+                'name' => $user->shift_name,
+                'start' => $shiftStart,
+                'end' => $shiftEnd,
+                'label' => $shiftLabel,
+            ] : null,
+
+            'sales_today' => $salesToday,
+            'today_sales_amount' => $salesToday,
+
             'default_store_id' => $user->default_store_id,
+            'store_id' => $user->defaultStore?->store_id,
+            'store_name' => $user->defaultStore?->store_name,
+            'location' => $user->defaultStore?->location,
+            'currency' => $user->defaultStore?->currency,
+            'default_currency' => $user->defaultStore?->currency,
+
             'default_store' => $user->defaultStore ? [
                 'store_id' => $user->defaultStore->store_id,
                 'store_name' => $user->defaultStore->store_name,
                 'currency' => $user->defaultStore->currency,
                 'location' => $user->defaultStore->location,
             ] : null,
+
             'stores' => $user->stores->map(fn ($store) => [
                 'store_id' => $store->store_id,
                 'store_name' => $store->store_name,
                 'currency' => $store->currency,
                 'location' => $store->location,
             ])->values()->all(),
+
             'roles' => $user->getRoleNames()->values()->all(),
             'permissions' => $user->getAllPermissions()->pluck('name')->values()->all(),
         ];

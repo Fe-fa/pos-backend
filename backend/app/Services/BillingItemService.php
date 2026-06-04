@@ -5,7 +5,6 @@ namespace App\Services;
 use App\Models\Billing;
 use App\Models\BillingItem;
 use App\Models\Product;
-use Illuminate\Contracts\Pagination\Paginator as PaginatorContract;
 
 class BillingItemService
 {
@@ -171,41 +170,5 @@ class BillingItemService
         );
 
         return $item->fresh()->load('product.category');
-    }
-
-    public function getItems(
-        Billing $billing,
-        bool $withTrashed = false,
-        bool $onlyTrashed = false,
-        int $perPage = 10
-    ): PaginatorContract {
-        $perPage = max(1, min($perPage, 100));
-
-        $query = $billing->items()
-            ->with('product.category')
-            ->orderByDesc('billing_item_id');
-
-        if ($onlyTrashed) {
-            $query->onlyTrashed();
-        } elseif ($withTrashed) {
-            $query->withTrashed();
-        }
-
-        $items = $query->simplePaginate($perPage)->withQueryString();
-
-        $this->auditLogService->log(
-            'billing_item.view',
-            $billing,
-            null,
-            null,
-            [
-                'items_count' => count($items->items()),
-                'with_trashed' => $withTrashed,
-                'only_trashed' => $onlyTrashed,
-            ],
-            $billing->store_id
-        );
-
-        return $items;
     }
 }

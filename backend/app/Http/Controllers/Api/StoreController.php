@@ -17,12 +17,12 @@ class StoreController extends Controller
     public function index(Request $request): JsonResponse
     {
         $user = $request->user();
-        $perPage = max(1, min((int) $request->get('per_page', 10), 100));
+        $perPage = max(1, min((int) $request->get('per_page', 20), 100));
 
         $query = Store::query()
-            ->withCount('assignedUsers')
-            ->orderBy('store_name');
+            ->withCount('assignedUsers');
 
+        // Multi-tenant permission validation
         if (! $user->isAdmin()) {
             $allowedStoreIds = $user->stores()->pluck('stores.store_id')
                 ->push($user->default_store_id)
@@ -33,13 +33,28 @@ class StoreController extends Controller
             $query->whereIn('store_id', $allowedStoreIds);
         }
 
+        // Search filtering logic matching your template format
+        $query->when($request->search, function ($q, $search) {
+            $search = trim($search);
+            $q->where('store_name', 'like', "%{$search}%");
+        });
+
         if ($request->filled('is_active')) {
             $query->where('is_active', filter_var($request->input('is_active'), FILTER_VALIDATE_BOOLEAN));
         }
 
+        $query->orderBy('store_name');
+
+        $stores = $query->paginate($perPage);
+
         return response()->json([
-            'message' => 'Stores retrieved successfully.',
-            'data' => $query->simplePaginate($perPage)->withQueryString(),
+            'data' => $stores->items(),
+            'meta' => [
+                'current_page' => $stores->currentPage(),
+                'last_page'    => $stores->lastPage(),
+                'per_page'     => $stores->perPage(),
+                'total'        => $stores->total(),
+            ],
         ]);
     }
 

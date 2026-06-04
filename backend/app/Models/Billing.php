@@ -7,8 +7,6 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use App\Models\DocumentSequence;
-use Illuminate\Support\Facades\DB;
 
 class Billing extends Model
 {
@@ -33,8 +31,14 @@ class Billing extends Model
         'stock_applied_at',
         'billing_date',
         'notes',
+        'fulfillment_status',
+        'fulfillment_type',
     ];
-    
+
+    protected $appends = [
+        'order_number',
+    ];
+
     protected $casts = [
         'subtotal' => 'decimal:2',
         'vat_amount' => 'decimal:2',
@@ -53,25 +57,34 @@ class Billing extends Model
 
         static::creating(function ($model) {
             if (empty($model->invnumber)) {
-                // 1. Convert attributes to floats safely to prevent null matching 0
                 $total = (float) $model->total;
                 $paid = (float) $model->paid_amount;
-                
-                // 2. Strict calculation: Is it fully paid upfront?
+
                 $isFullyPaid = ($total > 0 && $paid >= $total);
 
-                // 3. Absolute Safeguard: If it is explicitly marked as a draft, or nothing has been paid, it is ALWAYS an invoice
                 if ($model->is_draft || $model->status === 'draft' || $paid === 0.00) {
                     $isFullyPaid = false;
                 }
 
-                // 4. Assign the correct sequence path
                 $documentType = $isFullyPaid ? 'receipt' : 'invoice';
-                
+
                 $documentService = app(\App\Services\DocumentNumberService::class);
                 $model->invnumber = $documentService->nextNumber($model->store_id, $documentType);
             }
+
+            if (empty($model->fulfillment_status)) {
+                $model->fulfillment_status = 'pending';
+            }
+
+            if (empty($model->fulfillment_type)) {
+                $model->fulfillment_type = 'walk_in_counter';
+            }
         });
+    }
+
+    public function getOrderNumberAttribute(): string
+    {
+        return 'ORD-' . str_pad((string) $this->billing_id, 4, '0', STR_PAD_LEFT);
     }
 
     public function store(): BelongsTo
