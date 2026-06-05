@@ -21,7 +21,7 @@ class BillingItemController extends Controller
 
     public function index(Request $request, Billing $billing): JsonResponse
     {
-        $perPage = max(1, min((int) $request->get('per_page', 10), 100));
+        $perPage = max(1, min((int) $request->get('per_page', 10), 50));
 
         $query = $billing->items()
             ->with('product.category');
@@ -31,8 +31,6 @@ class BillingItemController extends Controller
         } elseif ($request->boolean('with_trashed')) {
             $query->withTrashed();
         }
-
-        // Search modifier template logic
         $query->when($request->search, function ($q, $search) {
             $search = trim($search);
             $q->whereHas('product', function ($sub) use ($search) {

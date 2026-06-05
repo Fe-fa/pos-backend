@@ -18,7 +18,7 @@ class ProductController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $perPage = (int) ($request->per_page ?? 6);
+        $perPage = (int) ($request->per_page ?? 12);
         $user = $request->user();
 
         $query = Product::query()

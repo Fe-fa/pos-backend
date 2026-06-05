@@ -39,7 +39,7 @@ class CustomerController extends Controller
     public function index(Request $request): JsonResponse
     {
         $user = $request->user();
-        $perPage = max(1, min((int) $request->get('per_page', 10), 100));
+        $perPage = max(1, min((int) $request->get('per_page', 1), 50));
         $query = Customer::query()
             ->withSum(['billings as dynamic_balance' => function ($subQuery) {
                 $subQuery->where('status', '!=', 'paid');

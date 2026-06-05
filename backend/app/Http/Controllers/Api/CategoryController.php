@@ -18,7 +18,7 @@ class CategoryController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $perPage = (int) ($request->per_page ?? 4);
+        $perPage = (int) ($request->per_page ?? 3);
         $user = $request->user();
 
         if ($request->filled('store_id')) {
