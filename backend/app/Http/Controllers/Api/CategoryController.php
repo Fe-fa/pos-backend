@@ -18,8 +18,12 @@ class CategoryController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $perPage = (int) ($request->per_page ?? 12);
+        $perPage = (int) ($request->per_page ?? 4);
         $user = $request->user();
+
+        if ($request->filled('store_id')) {
+            $this->service->authorizeStoreAccess($user, $request->store_id);
+        }
 
         $query = Category::query()
             ->withCount('products');
@@ -28,15 +32,15 @@ class CategoryController extends Controller
             $query->whereIn('categories.store_id', $this->service->allowedStoreIds($user));
         }
 
-        $query->when($request->store_id, function ($q, $storeId) use ($user) {
-                $this->service->authorizeStoreAccess($user, $storeId);
+        $query
+            ->when($request->store_id, function ($q, $storeId) {
                 $q->where('categories.store_id', $storeId);
             })
             ->when($request->search, function ($q, $search) {
                 $search = trim($search);
                 $q->where('categories.category_name', 'like', "%{$search}%");
             })
-            ->orderBy('categories.category_name'); 
+            ->orderBy('categories.category_name');
 
         $categories = $query->paginate($perPage);
 
@@ -47,6 +51,8 @@ class CategoryController extends Controller
                 'last_page'    => $categories->lastPage(),
                 'per_page'     => $categories->perPage(),
                 'total'        => $categories->total(),
+                'from'         => $categories->firstItem(),
+                'to'           => $categories->lastItem(),
             ],
         ]);
     }

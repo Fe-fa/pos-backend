@@ -17,44 +17,43 @@ class InventoryController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $perPage = (int) ($request->per_page ?? 10);
+        $perPage = max(1, (int) ($request->per_page ?? 10));
         $user = $request->user();
 
-        // 1. Initialize Base Query
         $query = Inventory::query()
             ->with(['store', 'product.category']);
 
-        // 2. Mandatory Multi-Tenant Security Logic
         if (!$user->isAdmin() && !$user->can('stores.manage')) {
-            $storeIds = $user->stores()->pluck('stores.store_id')
+            $storeIds = $user->stores()
+                ->pluck('stores.store_id')
                 ->push($user->default_store_id)
                 ->filter()
-                ->unique();
+                ->unique()
+                ->values();
 
             $query->whereIn('store_id', $storeIds);
         }
 
-        // 3. Conditional Filtering matching your layout structure
-        $query->when($request->store_id, function ($q, $storeId) {
+        $query
+            ->when($request->store_id, function ($q, $storeId) {
                 $q->where('store_id', $storeId);
             })
             ->when($request->search, function ($q, $search) {
                 $search = trim($search);
+
                 $q->where(function ($sub) use ($search) {
                     $sub->whereHas('product', function ($pq) use ($search) {
                         $pq->where('product_name', 'like', "%{$search}%")
-                           ->orWhere('sku', 'like', "%{$search}%");
+                            ->orWhere('sku', 'like', "%{$search}%");
                     })->orWhere('batch_no', 'like', "%{$search}%");
                 });
             })
             ->orderBy('product_id')
             ->orderBy('created_at')
-            ->orderBy('inventory_id'); // Match original service sort criteria
+            ->orderBy('inventory_id');
 
-        // 4. Paginate
         $inventories = $query->paginate($perPage);
 
-        // 5. Output response strictly wrapped matching specified structure
         return response()->json([
             'data' => $inventories->items(),
             'meta' => [
@@ -62,31 +61,33 @@ class InventoryController extends Controller
                 'last_page'    => $inventories->lastPage(),
                 'per_page'     => $inventories->perPage(),
                 'total'        => $inventories->total(),
+                'from'         => $inventories->firstItem(),
+                'to'           => $inventories->lastItem(),
             ],
         ]);
     }
 
     public function history(Request $request): JsonResponse
     {
-        $perPage = (int) ($request->per_page ?? 10);
+        $perPage = max(1, (int) ($request->per_page ?? 20));
         $user = $request->user();
 
-        // 1. Initialize History Query
         $query = InventoryHistory::query()
             ->with(['store', 'product', 'user']);
 
-        // 2. Mandatory Multi-Tenant Security Logic
         if (!$user->isAdmin() && !$user->can('stores.manage')) {
-            $storeIds = $user->stores()->pluck('stores.store_id')
+            $storeIds = $user->stores()
+                ->pluck('stores.store_id')
                 ->push($user->default_store_id)
                 ->filter()
-                ->unique();
+                ->unique()
+                ->values();
 
             $query->whereIn('store_id', $storeIds);
         }
 
-        // 3. Conditional Filters matching design template
-        $query->when($request->store_id, function ($q, $storeId) {
+        $query
+            ->when($request->store_id, function ($q, $storeId) {
                 $q->where('store_id', $storeId);
             })
             ->when($request->product_id, function ($q, $productId) {
@@ -97,21 +98,20 @@ class InventoryController extends Controller
             })
             ->when($request->search, function ($q, $search) {
                 $search = trim($search);
+
                 $q->where(function ($sub) use ($search) {
                     $sub->whereHas('product', function ($pq) use ($search) {
                         $pq->where('product_name', 'like', "%{$search}%")
-                           ->orWhere('sku', 'like', "%{$search}%");
+                            ->orWhere('sku', 'like', "%{$search}%");
                     })
                     ->orWhere('batch_no', 'like', "%{$search}%")
                     ->orWhere('reference', 'like', "%{$search}%");
                 });
             })
-            ->orderByDesc('inventory_history_id'); // Match historical inverse tracking
+            ->orderByDesc('inventory_history_id');
 
-        // 4. Execute pagination query
         $histories = $query->paginate($perPage);
 
-        // 5. Package back standard matching response envelope
         return response()->json([
             'data' => $histories->items(),
             'meta' => [
@@ -119,10 +119,12 @@ class InventoryController extends Controller
                 'last_page'    => $histories->lastPage(),
                 'per_page'     => $histories->perPage(),
                 'total'        => $histories->total(),
+                'from'         => $histories->firstItem(),
+                'to'           => $histories->lastItem(),
             ],
         ]);
     }
-    
+
     public function store(StoreInventoryRequest $request): JsonResponse
     {
         return response()->json([

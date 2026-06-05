@@ -16,17 +16,14 @@ class BillingController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        // Set dynamic limit capping parameters matching your original service bounds
-        $perPage = max(1, min((int) ($request->per_page ?? 20), 100));
+        $perPage = max(1, min((int) ($request->per_page ?? 10), 100));
         $user = $request->user();
 
-        // 1. Initialize Base Query & Metrics
         $query = Billing::query()
             ->with(['customer', 'store', 'user', 'payments'])
             ->withCount('items')
             ->withSum('items', 'quantity');
 
-        // 2. Handle Soft Deletes Query States
         if ($request->has('with_trashed') && filter_var($request->with_trashed, FILTER_VALIDATE_BOOLEAN)) {
             $query->withTrashed();
         }
@@ -34,11 +31,7 @@ class BillingController extends Controller
         if ($request->has('only_trashed') && filter_var($request->only_trashed, FILTER_VALIDATE_BOOLEAN)) {
             $query->onlyTrashed();
         }
-
-        // 3. Apply Multi-tenant Data Separation
         $query = $this->service->scopeAccessible($query, $user);
-
-        // 4. Conditional Filters matching your requested structural pattern
         $query->when($request->store_id, function ($q, $storeId) use ($user) {
                 $this->service->authorizeStoreAccess($user, $storeId);
                 $q->where('store_id', $storeId);
@@ -55,12 +48,8 @@ class BillingController extends Controller
             ->when($request->fulfillment_type, function ($q, $fulfillmentType) {
                 $q->where('fulfillment_type', $fulfillmentType);
             })
-            ->orderByDesc('billing_id'); // Match your original table sort tracking rules
-
-        // 5. Execute core metadata tracking engine page query
+            ->orderByDesc('billing_id');
         $billings = $query->paginate($perPage);
-
-        // 6. Return response explicitly structured to fit matching target schema
         return response()->json([
             'data' => $billings->items(),
             'meta' => [

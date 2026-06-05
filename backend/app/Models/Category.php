@@ -14,6 +14,9 @@ class Category extends Model
 
     protected $table = 'categories';
     protected $primaryKey = 'category_id';
+    public $incrementing = true;
+    protected $keyType = 'int';
+
 
     protected $fillable = [
         'uuid',
@@ -34,8 +37,6 @@ class Category extends Model
     protected static function boot()
     {
         parent::boot();
-
-        // Intercept the deleting event
         static::deleting(function ($category) {
             if ($category->products()->exists()) {
                 throw new Exception("Cannot delete category because it contains products.");

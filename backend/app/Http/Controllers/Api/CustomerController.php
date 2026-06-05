@@ -40,8 +40,6 @@ class CustomerController extends Controller
     {
         $user = $request->user();
         $perPage = max(1, min((int) $request->get('per_page', 10), 100));
-
-        // Dynamically compute the cumulative balance from unpaid bills
         $query = Customer::query()
             ->withSum(['billings as dynamic_balance' => function ($subQuery) {
                 $subQuery->where('status', '!=', 'paid');
@@ -55,8 +53,6 @@ class CustomerController extends Controller
             $this->authorizeStoreAccess($user, $request->store_id);
             $query->where('store_id', $request->store_id);
         }
-
-        // Search modifier mapping
         $query->when($request->search, function ($q, $search) {
             $s = trim((string) $search);
             $q->where(function ($w) use ($s) {
@@ -70,7 +66,6 @@ class CustomerController extends Controller
 
         $customers = $query->paginate($perPage);
 
-        // Format computed properties over items collection loop directly
         $formattedItems = collect($customers->items())->map(function (Customer $customer) {
             $customer->current_balance = round((float) ($customer->dynamic_balance ?? 0.00), 2);
             unset($customer->dynamic_balance);
@@ -104,8 +99,6 @@ class CustomerController extends Controller
     public function show(Customer $customer): JsonResponse
     {
         $this->authorizeStoreAccess(request()->user(), $customer->store_id);
-
-        // Load dynamic balance metrics alongside relations count matching current balances
         $customer->loadSum(['billings as dynamic_balance' => function ($query) {
             $query->where('status', '!=', 'paid');
         }], 'balance_due');
