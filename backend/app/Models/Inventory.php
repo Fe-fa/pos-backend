@@ -53,4 +53,8 @@ class Inventory extends Model
     {
         return $query->orderBy('created_at')->orderBy('inventory_id');
     }
+    public function resolveRouteBinding($value, $field = null): ?self
+{
+    return $this->where($field ?? $this->primaryKey, $value)->firstOrFail();
+}
 }

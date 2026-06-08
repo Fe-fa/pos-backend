@@ -33,6 +33,10 @@ class Category extends Model
     {
         return $this->hasMany(Product::class, 'category_id', 'category_id');
     }
+    public function resolveRouteBinding($value, $field = null): ?self
+{
+    return $this->where($field ?? $this->primaryKey, $value)->firstOrFail();
+}
 
     protected static function boot()
     {

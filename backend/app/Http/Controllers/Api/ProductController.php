@@ -18,11 +18,12 @@ class ProductController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $perPage = (int) ($request->per_page ?? 12);
+        $perPage = max(1, min((int) ($request->per_page ?? 12), 100));
+
         $user = $request->user();
 
         $query = Product::query()
-            ->with(['category'])
+            ->with(['category', 'store'])
             ->withCount('inventories')
             ->withSum('inventories as total_stock', 'quantity');
 
@@ -36,7 +37,7 @@ class ProductController extends Controller
                 $q->where('store_id', $storeId);
             })
             ->when($request->search, function ($q, $search) {
-                $search = trim($search);
+                $search = str_replace(['%', '_'], ['\%', '\_'], trim($search));
 
                 $q->where(function ($subQuery) use ($search) {
                     $subQuery->where('product_name', 'like', "%{$search}%")
@@ -74,7 +75,6 @@ class ProductController extends Controller
             ->orderByDesc('product_id');
 
         $products = $query->paginate($perPage);
-
         return response()->json([
             'data' => $products->items(),
             'meta' => [
@@ -84,6 +84,7 @@ class ProductController extends Controller
                 'total'        => $products->total(),
                 'from'         => $products->firstItem(),
                 'to'           => $products->lastItem(),
+                'path'         => $products->path(),
             ],
         ]);
     }

@@ -13,6 +13,7 @@ use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\AccessControlController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\PublicDocumentController;
+use App\Http\Controllers\Api\PosDashboardController;
 
 Route::prefix('auth')->group(function () {
     Route::post('/register', [AuthController::class, 'register'])->name('auth.register');
@@ -43,14 +44,16 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('users', UserController::class);
     Route::post('users/{user}/stores', [UserController::class, 'syncStores'])->name('users.stores.sync');
 
+    Route::get('/pos/bootstrap', [PosDashboardController::class, 'bootstrap']);
+
     Route::apiResource('categories', CategoryController::class);
     Route::apiResource('products', ProductController::class);
 
     Route::get('inventory/history', [InventoryController::class, 'history'])->name('inventory.history');
     Route::post('inventory/consume-fifo', [InventoryController::class, 'consumeFifo'])->name('inventory.consume-fifo');
-    Route::apiResource('inventory', InventoryController::class)->parameters([
-        'inventory' => 'inventory',
-    ]);
+ Route::apiResource('inventory', InventoryController::class)->parameters([
+    'inventory' => 'inventoryItem',   // ← distinct name, avoids the collision
+]);
 
     Route::apiResource('customers', CustomerController::class);
  Route::apiResource('billings', BillingController::class);

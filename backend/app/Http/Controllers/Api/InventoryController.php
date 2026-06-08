@@ -69,7 +69,7 @@ class InventoryController extends Controller
 
     public function history(Request $request): JsonResponse
     {
-        $perPage = max(1, (int) ($request->per_page ?? 20));
+        $perPage = max(1, (int) ($request->per_page ?? 10));
         $user = $request->user();
 
         $query = InventoryHistory::query()
@@ -133,30 +133,30 @@ class InventoryController extends Controller
         ], 201);
     }
 
-    public function show(Inventory $inventory): JsonResponse
-    {
-        return response()->json([
-            'message' => 'Inventory retrieved successfully.',
-            'data'    => $this->service->show($inventory),
-        ]);
-    }
+public function show(Inventory $inventoryItem): JsonResponse
+{
+    return response()->json([
+        'message' => 'Inventory retrieved successfully.',
+        'data'    => $this->service->show($inventoryItem),
+    ]);
+}
 
-    public function update(UpdateInventoryRequest $request, Inventory $inventory): JsonResponse
-    {
-        return response()->json([
-            'message' => 'Inventory updated successfully.',
-            'data'    => $this->service->update($request->user(), $inventory, $request->validated()),
-        ]);
-    }
+public function update(UpdateInventoryRequest $request, Inventory $inventoryItem): JsonResponse
+{
+    return response()->json([
+        'message' => 'Inventory updated successfully.',
+        'data'    => $this->service->update($request->user(), $inventoryItem, $request->validated()),
+    ]);
+}
 
-    public function destroy(Inventory $inventory): JsonResponse
-    {
-        $this->service->delete($inventory);
+public function destroy(Inventory $inventoryItem): JsonResponse
+{
+    $this->service->delete($inventoryItem);
 
-        return response()->json([
-            'message' => 'Inventory deleted successfully.',
-        ]);
-    }
+    return response()->json([
+        'message' => 'Inventory deleted successfully.',
+    ]);
+}
 
     public function consumeFifo(Request $request): JsonResponse
     {

@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use App\Models\Store; 
 
 class Product extends Model
 {
@@ -73,4 +74,8 @@ class Product extends Model
     {
         return $this->hasMany(StockMovement::class, 'product_id', 'product_id');
     }
+public function store(): BelongsTo
+{
+    return $this->belongsTo(Store::class, 'store_id', 'store_id');
+}
 }

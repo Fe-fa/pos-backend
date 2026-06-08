@@ -17,7 +17,7 @@ class StoreController extends Controller
     public function index(Request $request): JsonResponse
     {
         $user = $request->user();
-        $perPage = max(1, min((int) $request->get('per_page', 20), 100));
+        $perPage = max(1, min((int) $request->get('per_page', 2), 100));
 
         $query = Store::query()
             ->withCount('assignedUsers');

@@ -36,4 +36,8 @@ class Customer extends Model
     {
         return $this->hasMany(Billing::class, 'customer_id', 'customer_id');
     }
+    public function resolveRouteBinding($value, $field = null): ?self
+{
+    return $this->where($field ?? $this->primaryKey, $value)->firstOrFail();
+}
 }
