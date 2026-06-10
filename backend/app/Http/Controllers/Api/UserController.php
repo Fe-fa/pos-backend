@@ -15,76 +15,85 @@ use Illuminate\Support\Arr;
 
 class UserController extends Controller
 {
-    public function index(Request $request): JsonResponse
-    {
-        $actor = $request->user();
-        $requestedStoreId = $this->requestedStoreId($request);
+public function index(Request $request): JsonResponse
+{
+    $actor = $request->user();
+    $requestedStoreId = $this->requestedStoreId($request);
+    $perPage = max(1, min((int) ($request->per_page ?? 10), 100)); // Default to 10, max 100
 
-        $query = User::query()
-            ->select('users.*')
-            ->selectSub($this->todayPaymentsSubQuery($actor, $requestedStoreId), 'sales_today')
-            ->with(['defaultStore', 'stores'])
-            ->orderByDesc('user_id');
+    $query = User::query()
+        ->select('users.*')
+        ->selectSub($this->todayPaymentsSubQuery($actor, $requestedStoreId), 'sales_today')
+        ->with(['defaultStore', 'stores'])
+        ->orderByDesc('user_id');
 
-        if ($request->filled('search')) {
-            $search = trim((string) $request->input('search'));
-
-            $query->where(function ($builder) use ($search) {
-                $builder->where('first_name', 'like', "%{$search}%")
-                    ->orWhere('last_name', 'like', "%{$search}%")
-                    ->orWhere('username', 'like', "%{$search}%")
-                    ->orWhere('email', 'like', "%{$search}%")
-                    ->orWhere('shift_name', 'like', "%{$search}%");
-            });
-        }
-
-        if ($request->filled('role')) {
-            $query->where('role', (string) $request->input('role'));
-        }
-
-        if ($actor->isManager()) {
-            $allowedStoreIds = $this->allowedStoreIds($actor);
-
-            $query->where('role', User::ROLE_CASHIER)
-                ->where(function ($builder) use ($allowedStoreIds) {
-                    $builder->whereIn('default_store_id', $allowedStoreIds)
-                        ->orWhereHas('stores', fn ($relation) => $relation->whereIn('stores.store_id', $allowedStoreIds));
-                });
-        }
-
-        if ($requestedStoreId !== null) {
-            if ($actor->isManager() && ! in_array($requestedStoreId, $this->allowedStoreIds($actor), true)) {
-                return response()->json([
-                    'message' => 'You do not have access to this store.',
-                ], 403);
-            }
-
-            $query->where(function ($builder) use ($requestedStoreId) {
-                $builder->where('default_store_id', $requestedStoreId)
-                    ->orWhereHas('stores', fn ($relation) => $relation->where('stores.store_id', $requestedStoreId));
-            });
-        }
-
-        if ($request->filled('assigned')) {
-            if ($request->input('assigned') === 'assigned') {
-                $query->where(function ($builder) {
-                    $builder->whereNotNull('default_store_id')
-                        ->orWhereHas('stores');
-                });
-            }
-
-            if ($request->input('assigned') === 'unassigned') {
-                $query->whereNull('default_store_id')
-                    ->whereDoesntHave('stores');
-            }
-        }
-
-        return response()->json([
-            'data' => $query->get()
-                ->map(fn (User $user) => $this->transformUser($user, $actor, $requestedStoreId))
-                ->values(),
-        ]);
+    // ← all existing filters stay exactly as they are
+    if ($request->filled('search')) {
+        $search = trim((string) $request->input('search'));
+        $query->where(function ($builder) use ($search) {
+            $builder->where('first_name', 'like', "%{$search}%")
+                ->orWhere('last_name', 'like', "%{$search}%")
+                ->orWhere('username', 'like', "%{$search}%")
+                ->orWhere('email', 'like', "%{$search}%")
+                ->orWhere('shift_name', 'like', "%{$search}%");
+        });
     }
+
+    if ($request->filled('role')) {
+        $query->where('role', (string) $request->input('role'));
+    }
+
+    if ($actor->isManager()) {
+        $allowedStoreIds = $this->allowedStoreIds($actor);
+        $query->where('role', User::ROLE_CASHIER)
+            ->where(function ($builder) use ($allowedStoreIds) {
+                $builder->whereIn('default_store_id', $allowedStoreIds)
+                    ->orWhereHas('stores', fn ($relation) => $relation->whereIn('stores.store_id', $allowedStoreIds));
+            });
+    }
+
+    if ($requestedStoreId !== null) {
+        if ($actor->isManager() && ! in_array($requestedStoreId, $this->allowedStoreIds($actor), true)) {
+            return response()->json([
+                'message' => 'You do not have access to this store.',
+            ], 403);
+        }
+
+        $query->where(function ($builder) use ($requestedStoreId) {
+            $builder->where('default_store_id', $requestedStoreId)
+                ->orWhereHas('stores', fn ($relation) => $relation->where('stores.store_id', $requestedStoreId));
+        });
+    }
+
+    if ($request->filled('assigned')) {
+        if ($request->input('assigned') === 'assigned') {
+            $query->where(function ($builder) {
+                $builder->whereNotNull('default_store_id')
+                    ->orWhereHas('stores');
+            });
+        }
+
+        if ($request->input('assigned') === 'unassigned') {
+            $query->whereNull('default_store_id')
+                ->whereDoesntHave('stores');
+        }
+    }
+    $users = $query->paginate($perPage);
+
+    return response()->json([
+        'data' => collect($users->items())
+            ->map(fn (User $user) => $this->transformUser($user, $actor, $requestedStoreId))
+            ->values(),
+        'meta' => [
+            'current_page' => $users->currentPage(),
+            'last_page'    => $users->lastPage(),
+            'per_page'     => $users->perPage(),
+            'total'        => $users->total(),
+            'from'         => $users->firstItem(),
+            'to'           => $users->lastItem(),
+        ],
+    ]);
+}
 
     public function store(StoreUserRequest $request): JsonResponse
     {

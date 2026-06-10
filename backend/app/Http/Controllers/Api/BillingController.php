@@ -50,6 +50,7 @@ class BillingController extends Controller
             })
             ->orderByDesc('billing_id');
         $billings = $query->paginate($perPage);
+
         return response()->json([
             'data' => $billings->items(),
             'meta' => [
@@ -57,6 +58,8 @@ class BillingController extends Controller
                 'last_page'    => $billings->lastPage(),
                 'per_page'     => $billings->perPage(),
                 'total'        => $billings->total(),
+                'from'         => $billings->firstItem(), 
+                'to'           => $billings->lastItem(),
             ],
         ]);
     }

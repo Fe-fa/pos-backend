@@ -25,11 +25,19 @@ class PaymentService
                 ->lockForUpdate()
                 ->firstOrFail();
 
+
             if (method_exists($billing, 'trashed') && $billing->trashed()) {
                 abort(response()->json([
                     'message' => 'Cannot record payment for a trashed billing.',
                 ], 422));
             }
+
+// ← ADD HERE
+if ($billing->status === 'paid') {
+    abort(response()->json([
+        'message' => 'This billing has already been fully paid.',
+    ], 422));
+}
 
             // Finalize billing once only.
             $billing = $this->billingService->finalizeIfNeeded($billing, $user);
@@ -77,14 +85,14 @@ class PaymentService
                 abort(response()->json(['message' => 'This customer has no outstanding balances due.'], 422));
             }
 
-// 3. Track cash distribution variables
-$moneyLeftToAllocate = $rawTendered;
-$globalChangeReturned = 0.00;
+           // 3. Track cash distribution variables
+             $moneyLeftToAllocate = $rawTendered;
+            $globalChangeReturned = 0.00;
 
-// Change is now strictly calculated from: Tendered - (Current Invoice + Outstanding Customer Balances)
-if ($method === 'cash' && $rawTendered > $totalCombinedBalance) {
-    $globalChangeReturned = round($rawTendered - $totalCombinedBalance, 2);
-}
+         // Change is now strictly calculated from: Tendered - (Current Invoice + Outstanding Customer Balances)
+            if ($method === 'cash' && $rawTendered > $totalCombinedBalance) {
+            $globalChangeReturned = round($rawTendered - $totalCombinedBalance, 2);
+              }
 
             $sortedBillings = $allCustomerBillings->sortBy('created_at');
             $primaryPaymentRecord = null;
