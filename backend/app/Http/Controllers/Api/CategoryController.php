@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AuthorizesPermission;
 use App\Http\Requests\Category\StoreCategoryRequest;
 use App\Http\Requests\Category\UpdateCategoryRequest;
 use App\Models\Category;
@@ -12,34 +13,41 @@ use Illuminate\Http\Request;
 
 class CategoryController extends Controller
 {
+    use AuthorizesPermission;
+
     public function __construct(
         private readonly CategoryService $service
     ) {}
 
     public function index(Request $request): JsonResponse
     {
-        $perPage = (int) ($request->per_page ?? 3);
-        $user = $request->user();
+        $perPage = max(1, min((int) ($request->per_page ?? 3), 100));
+        $user    = $request->user();
 
+        // If a specific store is requested, verify access to it
         if ($request->filled('store_id')) {
-            $this->service->authorizeStoreAccess($user, $request->store_id);
+            $this->service->authorizeStoreAccess($user, (int) $request->store_id);
         }
 
         $query = Category::query()
             ->withCount('products');
 
+        // Non-admins are always scoped to their allowed stores
         if (!$user->isAdmin()) {
-            $query->whereIn('categories.store_id', $this->service->allowedStoreIds($user));
+            $allowedIds = $this->service->allowedStoreIds($user);
+
+            // If they requested a store they don't belong to, allowedIds
+            // won't contain it, so the query returns nothing safely.
+            $query->whereIn('categories.store_id', $allowedIds);
         }
 
         $query
-            ->when($request->store_id, function ($q, $storeId) {
-                $q->where('categories.store_id', $storeId);
-            })
-            ->when($request->search, function ($q, $search) {
-                $search = trim($search);
-                $q->where('categories.category_name', 'like', "%{$search}%");
-            })
+            ->when($request->filled('store_id'), fn($q) =>
+                $q->where('categories.store_id', (int) $request->store_id)
+            )
+            ->when($request->filled('search'), fn($q) =>
+                $q->where('categories.category_name', 'like', '%' . trim($request->search) . '%')
+            )
             ->orderBy('categories.category_name');
 
         $categories = $query->paginate($perPage);
@@ -59,30 +67,45 @@ class CategoryController extends Controller
 
     public function store(StoreCategoryRequest $request): JsonResponse
     {
+        if ($error = $this->authorizePermission('categories.manage')) return $error;
+
         return response()->json([
             'message' => 'Category created successfully.',
-            'data' => $this->service->create($request->user(), $request->validated()),
+            'data'    => $this->service->create($request->user(), $request->validated()),
         ], 201);
     }
 
     public function show(Request $request, Category $category): JsonResponse
     {
+        // Ensure the user can access the store this category belongs to
+        $this->service->authorizeStoreAccess($request->user(), $category->store_id);
+
         return response()->json([
             'message' => 'Category retrieved successfully.',
-            'data' => $this->service->show($category, $request->user()),
+            'data'    => $this->service->show($category, $request->user()),
         ]);
     }
 
     public function update(UpdateCategoryRequest $request, Category $category): JsonResponse
     {
+        if ($error = $this->authorizePermission('categories.manage')) return $error;
+
+        // Double-check store ownership even after permission gate
+        $this->service->authorizeStoreAccess($request->user(), $category->store_id);
+
         return response()->json([
             'message' => 'Category updated successfully.',
-            'data' => $this->service->update($request->user(), $category, $request->validated()),
+            'data'    => $this->service->update($request->user(), $category, $request->validated()),
         ]);
     }
 
     public function destroy(Request $request, Category $category): JsonResponse
     {
+        if ($error = $this->authorizePermission('categories.manage')) return $error;
+
+        // Double-check store ownership even after permission gate
+        $this->service->authorizeStoreAccess($request->user(), $category->store_id);
+
         $this->service->delete($request->user(), $category);
 
         return response()->json([
