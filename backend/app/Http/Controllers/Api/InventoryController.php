@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AuthorizesPermission;
 use App\Http\Requests\Inventory\StoreInventoryRequest;
 use App\Http\Requests\Inventory\UpdateInventoryRequest;
 use App\Models\Inventory;
@@ -13,6 +14,8 @@ use Illuminate\Http\Request;
 
 class InventoryController extends Controller
 {
+    use AuthorizesPermission;
+
     public function __construct(private readonly InventoryService $service) {}
 
     public function index(Request $request): JsonResponse
@@ -40,7 +43,6 @@ class InventoryController extends Controller
             })
             ->when($request->search, function ($q, $search) {
                 $search = trim($search);
-
                 $q->where(function ($sub) use ($search) {
                     $sub->whereHas('product', function ($pq) use ($search) {
                         $pq->where('product_name', 'like', "%{$search}%")
@@ -98,7 +100,6 @@ class InventoryController extends Controller
             })
             ->when($request->search, function ($q, $search) {
                 $search = trim($search);
-
                 $q->where(function ($sub) use ($search) {
                     $sub->whereHas('product', function ($pq) use ($search) {
                         $pq->where('product_name', 'like', "%{$search}%")
@@ -127,39 +128,47 @@ class InventoryController extends Controller
 
     public function store(StoreInventoryRequest $request): JsonResponse
     {
+        if ($error = $this->authorizePermission('inventory.manage')) return $error;
+
         return response()->json([
             'message' => 'Inventory created successfully.',
             'data'    => $this->service->create($request->user(), $request->validated()),
         ], 201);
     }
 
-public function show(Inventory $inventoryItem): JsonResponse
-{
-    return response()->json([
-        'message' => 'Inventory retrieved successfully.',
-        'data'    => $this->service->show($inventoryItem),
-    ]);
-}
+    public function show(Inventory $inventoryItem): JsonResponse
+    {
+        return response()->json([
+            'message' => 'Inventory retrieved successfully.',
+            'data'    => $this->service->show($inventoryItem),
+        ]);
+    }
 
-public function update(UpdateInventoryRequest $request, Inventory $inventoryItem): JsonResponse
-{
-    return response()->json([
-        'message' => 'Inventory updated successfully.',
-        'data'    => $this->service->update($request->user(), $inventoryItem, $request->validated()),
-    ]);
-}
+    public function update(UpdateInventoryRequest $request, Inventory $inventoryItem): JsonResponse
+    {
+        if ($error = $this->authorizePermission('inventory.manage')) return $error;
 
-public function destroy(Inventory $inventoryItem): JsonResponse
-{
-    $this->service->delete($inventoryItem);
+        return response()->json([
+            'message' => 'Inventory updated successfully.',
+            'data'    => $this->service->update($request->user(), $inventoryItem, $request->validated()),
+        ]);
+    }
 
-    return response()->json([
-        'message' => 'Inventory deleted successfully.',
-    ]);
-}
+    public function destroy(Inventory $inventoryItem): JsonResponse
+    {
+        if ($error = $this->authorizePermission('inventory.manage')) return $error;
+
+        $this->service->delete($inventoryItem);
+
+        return response()->json([
+            'message' => 'Inventory deleted successfully.',
+        ]);
+    }
 
     public function consumeFifo(Request $request): JsonResponse
     {
+        if ($error = $this->authorizePermission('inventory.manage')) return $error;
+
         $data = $request->validate([
             'store_id'   => ['required', 'exists:stores,store_id'],
             'product_id' => ['required', 'exists:products,product_id'],

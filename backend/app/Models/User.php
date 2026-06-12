@@ -197,4 +197,8 @@ class User extends Authenticatable implements MustVerifyEmail
             return false;
         }
     }
+    public function sessions(): HasMany
+{
+    return $this->hasMany(Session::class, 'user_id', 'user_id');
+}
 }

@@ -30,25 +30,5 @@ class AppServiceProvider extends ServiceProvider
         Payment::class   => PaymentPolicy::class,
         Inventory::class => InventoryPolicy::class,
     ];
-
-    /**
-     * Register any authentication / authorization services.
-     */
-    public function boot(): void
-    {
-        // 1. CRITICAL: Initialize parent auth & policy mappings first so login works perfectly
-        $this->registerPolicies();
-
-        // 2. SAFE QUERY AUDITOR: Only triggers in your local development workspace
-        if (config('app.env') === 'local') {
-            DB::listen(function ($query) {
-                Log::info(sprintf(
-                    "\n[POS QUERY] Time: %s ms\nSQL: %s\nBindings: %s\n-----------------------",
-                    $query->time,
-                    $query->sql,
-                    json_encode($query->bindings)
-                ));
-            });
-        }
-    }
 }
+ 

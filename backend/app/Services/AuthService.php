@@ -59,11 +59,76 @@ class AuthService
         }
 
         $deviceName = $credentials['device_name'] ?? request()->userAgent() ?? 'api-device';
-        $token = $user->createToken($deviceName)->plainTextToken;
+
+ $expiresAt = config('sanctum.expiration')
+    ? now()->addMinutes((int) config('sanctum.expiration'))
+    : null;
+
+        $token = $user->createToken($deviceName, ['*'], $expiresAt);
+
+        $session = $this->writeSession($user, $token->accessToken->id);
 
         return [
             'token_type' => 'Bearer',
-            'access_token' => $token,
+            'access_token' => $token->plainTextToken,
+            'expires_at' => $expiresAt?->toDateTimeString(),
+            'refresh_expires_at' => now()
+                ->addMinutes(config('sanctum.refresh_expiration', config('sanctum.expiration', 0)))
+                ->toDateTimeString(),
+            'session_id' => $session->id,
+            'user' => $this->profile($user),
+        ];
+    }
+
+    public function refresh(User $user): array
+    {
+        $currentToken = $user->currentAccessToken();
+
+        if (! $currentToken) {
+            throw ValidationException::withMessages([
+                'token' => ['No active token found.'],
+            ]);
+        }
+
+        $refreshWindow = config('sanctum.refresh_expiration');
+        if ($refreshWindow !== null) {
+            $createdAt = $currentToken->created_at;
+            if ($createdAt->addMinutes($refreshWindow)->isPast()) {
+                $currentToken->delete();
+
+                throw ValidationException::withMessages([
+                    'token' => ['Refresh window expired. Please log in again.'],
+                ]);
+            }
+        }
+
+        $deviceName = $currentToken->name;
+        $oldTokenId = $currentToken->id;
+
+        $expiresAt = config('sanctum.expiration')
+            ? now()->addMinutes(config('sanctum.expiration'))
+            : null;
+
+        $newToken = $user->createToken($deviceName, ['*'], $expiresAt);
+
+        // Rotate: delete old token
+        $currentToken->delete();
+
+        // Update session row to point at new token, refresh activity
+        \DB::table('sessions')
+            ->where('user_id', $user->user_id)
+            ->where('ip_address', request()->ip())
+            ->update([
+                'last_activity' => now()->timestamp,
+            ]);
+
+        return [
+            'token_type' => 'Bearer',
+            'access_token' => $newToken->plainTextToken,
+            'expires_at' => $expiresAt?->toDateTimeString(),
+            'refresh_expires_at' => now()
+                ->addMinutes(config('sanctum.refresh_expiration', config('sanctum.expiration', 0)))
+                ->toDateTimeString(),
             'user' => $this->profile($user),
         ];
     }
@@ -71,11 +136,21 @@ class AuthService
     public function logout(User $user): void
     {
         $user->currentAccessToken()?->delete();
+        $this->deleteCurrentSession($user);
+    }
+
+    private function deleteCurrentSession(User $user): void
+    {
+        \DB::table('sessions')
+            ->where('user_id', $user->user_id)
+            ->where('ip_address', request()->ip())
+            ->delete();
     }
 
     public function logoutAll(User $user): void
     {
         $user->tokens()->delete();
+        $user->sessions()->delete();
     }
 
     public function profile(User $user): array
@@ -163,5 +238,75 @@ class AuthService
         }
 
         return null;
+    }
+
+    public function getSessions(User $user): array
+    {
+        $this->pruneExpiredSessions($user);
+
+        return $user->sessions()
+            ->orderByDesc('last_activity')
+            ->get()
+            ->map(fn ($session) => [
+                'id'            => $session->id,
+                'ip_address'    => $session->ip_address,
+                'user_agent'    => $session->user_agent,
+                'last_active'   => $session->last_activity_at->diffForHumans(),
+                'last_activity' => $session->last_activity_at->toDateTimeString(),
+                'expires_at'    => $session->last_activity_at
+                    ->copy()
+                    ->addMinutes(config('sanctum.session_lifetime', 10080))
+                    ->toDateTimeString(),
+                'is_current'    => $session->is_current,
+            ])
+            ->values()
+            ->all();
+    }
+
+    public function pruneExpiredSessions(User $user): void
+    {
+        $lifetime = config('sanctum.session_lifetime', 10080);
+        $cutoff = now()->subMinutes($lifetime)->timestamp;
+
+        $user->sessions()
+            ->where('last_activity', '<', $cutoff)
+            ->delete();
+    }
+
+    public function revokeSession(User $user, string $sessionId): bool
+    {
+        return (bool) $user->sessions()
+            ->where('id', $sessionId)
+            ->delete();
+    }
+
+    public function revokeAllSessions(User $user): void
+    {
+        $user->sessions()->delete();
+    }
+
+    public function touchSession(User $user): void
+    {
+        \DB::table('sessions')
+            ->where('user_id', $user->user_id)
+            ->where('ip_address', request()->ip())
+            ->update(['last_activity' => now()->timestamp]);
+    }
+
+    private function writeSession(User $user, ?int $tokenId = null): \stdClass
+    {
+        $request = request();
+        $id = \Str::random(40);
+
+        \DB::table('sessions')->insert([
+            'id'             => $id,
+            'user_id'        => $user->user_id,
+            'ip_address'     => $request->ip(),
+            'user_agent'     => substr($request->userAgent() ?? '', 0, 500),
+            'payload'        => '',
+            'last_activity'  => now()->timestamp,
+        ]);
+
+        return (object) ['id' => $id];
     }
 }

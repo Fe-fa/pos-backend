@@ -5,6 +5,8 @@ namespace App\Services;
 use App\Models\Billing;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 class BillingService
@@ -13,21 +15,19 @@ class BillingService
         private readonly DocumentNumberService $documentNumberService,
         private readonly AuditLogService $auditLogService,
         private readonly InventoryService $inventoryService,
-    ) {
-    }
+    ) {}
 
-    // Public so the controller can load store IDs for tenant matching
-    public function allowedStoreIds(User $user)
+    public function allowedStoreIds(User $user): Collection
     {
         return $user->stores()
             ->pluck('stores.store_id')
             ->push($user->default_store_id)
             ->filter()
+            ->map(fn($id) => (int) $id)
             ->unique()
             ->values();
     }
 
-    // Public so the controller can securely append access bounds to the base query
     public function scopeAccessible(Builder $query, User $user): Builder
     {
         if ($user->isAdmin()) {
@@ -45,19 +45,20 @@ class BillingService
             ->where('user_id', $user->user_id);
     }
 
-    // Public so the controller can evaluate explicit store parameters
     public function authorizeStoreAccess(User $user, int|string|null $storeId): void
     {
         if (!$storeId || $user->isAdmin()) {
             return;
         }
 
-        $allowed = $this->allowedStoreIds($user)->map(fn ($id) => (string) $id)->all();
+        $allowed = $this->allowedStoreIds($user)->all();
 
-        if (!in_array((string) $storeId, $allowed, true)) {
-            abort(response()->json([
-                'message' => 'You are not allowed to access this store.',
-            ], 403));
+        if (!in_array((int) $storeId, $allowed, true)) {
+            throw new HttpResponseException(
+                response()->json([
+                    'message' => 'You are not allowed to access this store.',
+                ], 403)
+            );
         }
     }
 
@@ -66,34 +67,37 @@ class BillingService
         $actor = $actor ?: auth()->user();
 
         if (!$actor) {
-            abort(response()->json([
-                'message' => 'Unauthenticated.',
-            ], 401));
+            throw new HttpResponseException(
+                response()->json(['message' => 'Unauthenticated.'], 401)
+            );
         }
 
         if ($actor->isAdmin()) {
             return;
         }
 
-        $storeIds = $this->allowedStoreIds($actor)->map(fn ($id) => (string) $id)->all();
-        $hasStoreAccess = in_array((string) $billing->store_id, $storeIds, true);
+        $storeIds = $this->allowedStoreIds($actor)->all();
+        $hasStoreAccess = in_array((int) $billing->store_id, $storeIds, true);
 
         if ($actor->isManager()) {
             if (!$hasStoreAccess) {
-                abort(response()->json([
-                    'message' => 'You are not allowed to access this billing.',
-                ], 403));
+                throw new HttpResponseException(
+                    response()->json([
+                        'message' => 'You are not allowed to access this billing.',
+                    ], 403)
+                );
             }
-
             return;
         }
 
         $ownsBilling = (string) $billing->user_id === (string) $actor->user_id;
 
         if (!$hasStoreAccess || !$ownsBilling) {
-            abort(response()->json([
-                'message' => 'You are not allowed to access this billing.',
-            ], 403));
+            throw new HttpResponseException(
+                response()->json([
+                    'message' => 'You are not allowed to access this billing.',
+                ], 403)
+            );
         }
     }
 
@@ -102,21 +106,21 @@ class BillingService
         $this->authorizeStoreAccess($user, $data['store_id']);
 
         $billing = Billing::create([
-            'store_id' => $data['store_id'],
-            'customer_id' => $data['customer_id'] ?? null,
-            'user_id' => $user->user_id,
-            'invnumber' => null,
-            'status' => 'unpaid',
-            'subtotal' => 0,
-            'vat_amount' => 0,
-            'total' => 0,
-            'paid_amount' => 0,
-            'balance_due' => 0,
-            'is_draft' => true,
-            'billing_date' => now(),
-            'notes' => $data['notes'] ?? null,
+            'store_id'           => $data['store_id'],
+            'customer_id'        => $data['customer_id'] ?? null,
+            'user_id'            => $user->user_id,
+            'invnumber'          => null,
+            'status'             => 'unpaid',
+            'subtotal'           => 0,
+            'vat_amount'         => 0,
+            'total'              => 0,
+            'paid_amount'        => 0,
+            'balance_due'        => 0,
+            'is_draft'           => true,
+            'billing_date'       => now(),
+            'notes'              => $data['notes'] ?? null,
             'fulfillment_status' => $data['fulfillment_status'] ?? 'pending',
-            'fulfillment_type' => $data['fulfillment_type'] ?? 'walk_in_counter',
+            'fulfillment_type'   => $data['fulfillment_type'] ?? 'walk_in_counter',
         ]);
 
         $this->auditLogService->log(
@@ -188,16 +192,16 @@ class BillingService
     {
         $billing->load('items');
 
-        $subtotal = (float) $billing->items->sum('line_subtotal');
-        $vatAmount = (float) $billing->items->sum('vat_amount');
-        $total = $subtotal + $vatAmount;
+        $subtotal   = (float) $billing->items->sum('line_subtotal');
+        $vatAmount  = (float) $billing->items->sum('vat_amount');
+        $total      = $subtotal + $vatAmount;
         $paidAmount = (float) $billing->payments()->sum('amount_received');
         $balanceDue = max($total - $paidAmount, 0);
 
         $billing->update([
-            'subtotal' => $subtotal,
-            'vat_amount' => $vatAmount,
-            'total' => $total,
+            'subtotal'    => $subtotal,
+            'vat_amount'  => $vatAmount,
+            'total'       => $total,
             'paid_amount' => $paidAmount,
             'balance_due' => $balanceDue,
         ]);
@@ -223,9 +227,11 @@ class BillingService
             $billing->load(['items.product', 'payments']);
 
             if ($billing->items->isEmpty()) {
-                abort(response()->json([
-                    'message' => 'Cannot finalize billing without items.',
-                ], 422));
+                throw new HttpResponseException(
+                    response()->json([
+                        'message' => 'Cannot finalize billing without items.',
+                    ], 422)
+                );
             }
 
             $invoiceNumber = $billing->invnumber ?: $this->documentNumberService->nextNumber(
@@ -245,9 +251,9 @@ class BillingService
             }
 
             $billing->update([
-                'is_draft' => false,
-                'status' => ((float) $billing->balance_due <= 0) ? 'paid' : 'unpaid',
-                'invnumber' => $invoiceNumber,
+                'is_draft'         => false,
+                'status'           => ((float) $billing->balance_due <= 0) ? 'paid' : 'unpaid',
+                'invnumber'        => $invoiceNumber,
                 'stock_applied_at' => now(),
             ]);
 
@@ -269,15 +275,19 @@ class BillingService
         $this->authorizeBillingAccess($billing);
 
         if (!$billing->is_draft) {
-            abort(response()->json([
-                'message' => 'Only draft billings can be deleted from cashier POS.',
-            ], 422));
+            throw new HttpResponseException(
+                response()->json([
+                    'message' => 'Only draft billings can be deleted from cashier POS.',
+                ], 422)
+            );
         }
 
         if ($billing->payments()->exists()) {
-            abort(response()->json([
-                'message' => 'Cannot delete billing with payments.',
-            ], 422));
+            throw new HttpResponseException(
+                response()->json([
+                    'message' => 'Cannot delete billing with payments.',
+                ], 422)
+            );
         }
 
         $old = $billing->load('items')->toArray();
@@ -299,9 +309,11 @@ class BillingService
         $billing = Billing::onlyTrashed()->find($billingId);
 
         if (!$billing) {
-            abort(response()->json([
-                'message' => "Billing record #{$billingId} was not found in trash.",
-            ], 404));
+            throw new HttpResponseException(
+                response()->json([
+                    'message' => "Billing record #{$billingId} was not found in trash.",
+                ], 404)
+            );
         }
 
         $this->authorizeBillingAccess($billing, $user);

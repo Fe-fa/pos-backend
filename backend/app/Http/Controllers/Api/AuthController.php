@@ -34,6 +34,22 @@ class AuthController extends Controller
             'message' => 'Login successful.',
             'token_type' => $result['token_type'],
             'access_token' => $result['access_token'],
+            'expires_at' => $result['expires_at'],
+            'refresh_expires_at' => $result['refresh_expires_at'],
+            'user' => $result['user'],
+        ]);
+    }
+
+    public function refresh(Request $request): JsonResponse
+    {
+        $result = $this->authService->refresh($request->user());
+
+        return response()->json([
+            'message' => 'Token refreshed.',
+            'token_type' => $result['token_type'],
+            'access_token' => $result['access_token'],
+            'expires_at' => $result['expires_at'],
+            'refresh_expires_at' => $result['refresh_expires_at'],
             'user' => $result['user'],
         ]);
     }
@@ -99,5 +115,31 @@ class AuthController extends Controller
         return $status === Password::PASSWORD_RESET
             ? response()->json(['message' => 'Password reset successful.'])
             : response()->json(['message' => 'Password reset failed.'], 400);
+    }
+
+    public function sessions(Request $request): JsonResponse
+    {
+        $sessions = $this->authService->getSessions($request->user());
+
+        return response()->json([
+            'message'  => 'Active sessions retrieved.',
+            'sessions' => $sessions,
+        ]);
+    }
+
+    public function revokeSession(Request $request, string $sessionId): JsonResponse
+    {
+        $revoked = $this->authService->revokeSession($request->user(), $sessionId);
+
+        return $revoked
+            ? response()->json(['message' => 'Session revoked successfully.'])
+            : response()->json(['message' => 'Session not found.'], 404);
+    }
+
+    public function revokeAllSessions(Request $request): JsonResponse
+    {
+        $this->authService->revokeAllSessions($request->user());
+
+        return response()->json(['message' => 'All sessions revoked.']);
     }
 }

@@ -25,13 +25,19 @@ Route::prefix('auth')->group(function () {
 Route::middleware('auth:sanctum')->group(function () {
     Route::prefix('auth')->group(function () {
         Route::get('/me', [AuthController::class, 'me'])->name('auth.me');
+        Route::post('/refresh', [AuthController::class, 'refresh'])->name('auth.refresh');
         Route::post('/logout', [AuthController::class, 'logout'])->name('auth.logout');
         Route::post('/logout-all', [AuthController::class, 'logoutAll'])->name('auth.logoutAll');
         Route::post('/verify-email', [AuthController::class, 'verifyEmail'])->name('auth.verify');
         Route::post('/resend-verification', [AuthController::class, 'resendVerification'])->name('auth.resend');
+
+        // Session management
+        Route::get('/sessions', [AuthController::class, 'sessions'])->name('auth.sessions.index');
+        Route::delete('/sessions', [AuthController::class, 'revokeAllSessions'])->name('auth.sessions.destroyAll');
+        Route::delete('/sessions/{sessionId}', [AuthController::class, 'revokeSession'])->name('auth.sessions.destroy');
     });
 
-    Route::middleware('auth:sanctum')->prefix('access-control')->group(function () {
+    Route::prefix('access-control')->group(function () {
         Route::get('/', [AccessControlController::class, 'index']);
         Route::put('/roles/{roleName}/permissions', [AccessControlController::class, 'updateRolePermissions']);
         Route::put('/users/{user}/role', [AccessControlController::class, 'assignUserRole']);
@@ -51,23 +57,23 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::get('inventory/history', [InventoryController::class, 'history'])->name('inventory.history');
     Route::post('inventory/consume-fifo', [InventoryController::class, 'consumeFifo'])->name('inventory.consume-fifo');
- Route::apiResource('inventory', InventoryController::class)->parameters([
-    'inventory' => 'inventoryItem',   // ← distinct name, avoids the collision
-]);
+    Route::apiResource('inventory', InventoryController::class)->parameters([
+        'inventory' => 'inventoryItem',
+    ]);
 
     Route::apiResource('customers', CustomerController::class);
- Route::apiResource('billings', BillingController::class);
-Route::post('billings/{id}/restore', [BillingController::class, 'restore'])->name('billings.restore');
+    Route::apiResource('billings', BillingController::class);
+    Route::post('billings/{id}/restore', [BillingController::class, 'restore'])->name('billings.restore');
 
-Route::apiResource('billing-items', BillingItemController::class);
-Route::post('billing-items/{id}/restore', [BillingItemController::class, 'restore'])->name('billing-items.restore');
+    Route::apiResource('billing-items', BillingItemController::class);
+    Route::post('billing-items/{id}/restore', [BillingItemController::class, 'restore'])->name('billing-items.restore');
 
-Route::get('billings/{billing}/items', [BillingItemController::class, 'index'])->name('billings.items.index');
-Route::post('billings/{billing}/items', [BillingItemController::class, 'store'])->name('billings.items.store');
+    Route::get('billings/{billing}/items', [BillingItemController::class, 'index'])->name('billings.items.index');
+    Route::post('billings/{billing}/items', [BillingItemController::class, 'store'])->name('billings.items.store');
 
-Route::post('billings/{billing}/charge', [PaymentController::class, 'charge'])->name('billings.charge');
-
+    Route::post('billings/{billing}/charge', [PaymentController::class, 'charge'])->name('billings.charge');
 });
+
 Route::get('public/documents/{mode}/{uuid}', [PublicDocumentController::class, 'show'])
     ->where('mode', 'receipt|invoice')
     ->name('public.documents.show');
@@ -75,4 +81,3 @@ Route::get('public/documents/{mode}/{uuid}', [PublicDocumentController::class, '
 Route::get('public/documents/{mode}/{uuid}/download', [PublicDocumentController::class, 'download'])
     ->where('mode', 'receipt|invoice')
     ->name('public.documents.download');
-

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AuthorizesPermission;
 use App\Http\Requests\Billing\StoreBillingRequest;
 use App\Http\Requests\Billing\UpdateBillingRequest;
 use App\Models\Billing;
@@ -12,10 +13,13 @@ use Illuminate\Http\Request;
 
 class BillingController extends Controller
 {
+    use AuthorizesPermission;
+
     public function __construct(private readonly BillingService $service) {}
 
     public function index(Request $request): JsonResponse
     {
+
         $perPage = max(1, min((int) ($request->per_page ?? 10), 100));
         $user = $request->user();
 
@@ -31,24 +35,28 @@ class BillingController extends Controller
         if ($request->has('only_trashed') && filter_var($request->only_trashed, FILTER_VALIDATE_BOOLEAN)) {
             $query->onlyTrashed();
         }
+
         $query = $this->service->scopeAccessible($query, $user);
-        $query->when($request->store_id, function ($q, $storeId) use ($user) {
+
+        $query
+            ->when($request->store_id, function ($q, $storeId) use ($user) {
                 $this->service->authorizeStoreAccess($user, $storeId);
                 $q->where('store_id', $storeId);
             })
-            ->when($request->status, function ($q, $status) {
-                $q->where('status', $status);
-            })
-            ->when($request->has('is_draft') && $request->is_draft !== '', function ($q) use ($request) {
-                $q->where('is_draft', filter_var($request->is_draft, FILTER_VALIDATE_BOOLEAN));
-            })
-            ->when($request->fulfillment_status, function ($q, $fulfillmentStatus) {
-                $q->where('fulfillment_status', $fulfillmentStatus);
-            })
-            ->when($request->fulfillment_type, function ($q, $fulfillmentType) {
-                $q->where('fulfillment_type', $fulfillmentType);
-            })
+            ->when($request->status, fn($q, $status) =>
+                $q->where('status', $status)
+            )
+            ->when($request->has('is_draft') && $request->is_draft !== '', fn($q) =>
+                $q->where('is_draft', filter_var($request->is_draft, FILTER_VALIDATE_BOOLEAN))
+            )
+            ->when($request->fulfillment_status, fn($q, $v) =>
+                $q->where('fulfillment_status', $v)
+            )
+            ->when($request->fulfillment_type, fn($q, $v) =>
+                $q->where('fulfillment_type', $v)
+            )
             ->orderByDesc('billing_id');
+
         $billings = $query->paginate($perPage);
 
         return response()->json([
@@ -58,7 +66,7 @@ class BillingController extends Controller
                 'last_page'    => $billings->lastPage(),
                 'per_page'     => $billings->perPage(),
                 'total'        => $billings->total(),
-                'from'         => $billings->firstItem(), 
+                'from'         => $billings->firstItem(),
                 'to'           => $billings->lastItem(),
             ],
         ]);
@@ -66,48 +74,56 @@ class BillingController extends Controller
 
     public function store(StoreBillingRequest $request): JsonResponse
     {
+        if ($error = $this->authorizePermission('billings.manage')) return $error;
+
         return response()->json([
             'message' => 'Draft billing created successfully.',
-            'data' => $this->service->createDraft($request->user(), $request->validated()),
+            'data'    => $this->service->createDraft($request->user(), $request->validated()),
         ], 201);
     }
 
     public function show($id): JsonResponse
     {
+    
+        
         $billing = Billing::withTrashed()->find($id);
 
         if (!$billing) {
             return response()->json([
                 'message' => "Billing record #{$id} was not found in our system.",
-                'data' => null,
+                'data'    => null,
             ], 404);
         }
 
         return response()->json([
             'message' => 'Billing retrieved successfully.',
-            'data' => $this->service->show($billing),
+            'data'    => $this->service->show($billing),
         ]);
     }
 
     public function update(UpdateBillingRequest $request, $id): JsonResponse
     {
+        if ($error = $this->authorizePermission('billings.manage')) return $error;
+
         $billing = Billing::withTrashed()->find($id);
 
         if (!$billing) {
             return response()->json([
-                'message' => "Update failed: Billing record #{$id} does not exist.",
+                'message'    => "Update failed: Billing record #{$id} does not exist.",
                 'debug_info' => 'Check if the record was deleted or if the database was refreshed.',
             ], 404);
         }
 
         return response()->json([
             'message' => 'Billing updated successfully.',
-            'data' => $this->service->updateHeader($billing, $request->validated()),
+            'data'    => $this->service->updateHeader($billing, $request->validated()),
         ]);
     }
 
     public function destroy(Billing $billing): JsonResponse
     {
+        if ($error = $this->authorizePermission('billings.manage')) return $error;
+
         $this->service->destroy($billing);
 
         return response()->json([
@@ -117,9 +133,11 @@ class BillingController extends Controller
 
     public function restore(Request $request, $id): JsonResponse
     {
+        if ($error = $this->authorizePermission('billings.manage')) return $error;
+
         return response()->json([
             'message' => 'Billing restored successfully.',
-            'data' => $this->service->restore($id, $request->user()),
+            'data'    => $this->service->restore($id, $request->user()),
         ]);
     }
 }

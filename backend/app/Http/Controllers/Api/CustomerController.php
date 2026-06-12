@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AuthorizesPermission;
 use App\Http\Requests\Customer\StoreCustomerRequest;
 use App\Http\Requests\Customer\UpdateCustomerRequest;
 use App\Models\Customer;
@@ -11,6 +12,8 @@ use Illuminate\Http\Request;
 
 class CustomerController extends Controller
 {
+    use AuthorizesPermission;
+
     private function allowedStoreIds($user)
     {
         return $user->stores()
@@ -40,6 +43,7 @@ class CustomerController extends Controller
     {
         $user = $request->user();
         $perPage = max(1, min((int) $request->get('per_page', 4), 50));
+
         $query = Customer::query()
             ->withSum(['billings as dynamic_balance' => function ($subQuery) {
                 $subQuery->where('status', '!=', 'paid');
@@ -53,6 +57,7 @@ class CustomerController extends Controller
             $this->authorizeStoreAccess($user, $request->store_id);
             $query->where('store_id', $request->store_id);
         }
+
         $query->when($request->search, function ($q, $search) {
             $s = trim((string) $search);
             $q->where(function ($w) use ($s) {
@@ -85,6 +90,8 @@ class CustomerController extends Controller
 
     public function store(StoreCustomerRequest $request): JsonResponse
     {
+        if ($error = $this->authorizePermission('customers.manage')) return $error;
+
         $this->authorizeStoreAccess($request->user(), $request->validated('store_id'));
 
         $customer = Customer::create($request->validated());
@@ -92,37 +99,40 @@ class CustomerController extends Controller
 
         return response()->json([
             'message' => 'Customer created successfully.',
-            'data' => $customer,
+            'data'    => $customer,
         ], 201);
     }
 
     public function show(Customer $customer): JsonResponse
     {
         $this->authorizeStoreAccess(request()->user(), $customer->store_id);
+
         $customer->loadSum(['billings as dynamic_balance' => function ($query) {
             $query->where('status', '!=', 'paid');
         }], 'balance_due');
 
         $customer->loadCount('billings');
-        
+
         $customer->current_balance = round((float) ($customer->dynamic_balance ?? 0.00), 2);
         unset($customer->dynamic_balance);
 
         return response()->json([
             'message' => 'Customer retrieved successfully.',
-            'data' => $customer,
+            'data'    => $customer,
         ]);
     }
 
     public function update(UpdateCustomerRequest $request, Customer $customer): JsonResponse
     {
+        if ($error = $this->authorizePermission('customers.manage')) return $error;
+
         $this->authorizeStoreAccess($request->user(), $customer->store_id);
         $this->authorizeStoreAccess($request->user(), $request->validated('store_id'));
 
         $customer->update($request->validated());
 
         $updatedCustomer = $customer->fresh();
-        
+
         $updatedCustomer->loadSum(['billings as dynamic_balance' => function ($query) {
             $query->where('status', '!=', 'paid');
         }], 'balance_due');
@@ -132,12 +142,14 @@ class CustomerController extends Controller
 
         return response()->json([
             'message' => 'Customer updated successfully.',
-            'data' => $updatedCustomer,
+            'data'    => $updatedCustomer,
         ]);
     }
 
     public function destroy(Customer $customer): JsonResponse
     {
+        if ($error = $this->authorizePermission('customers.manage')) return $error;
+
         $this->authorizeStoreAccess(request()->user(), $customer->store_id);
 
         if ($customer->billings()->exists()) {
@@ -148,6 +160,8 @@ class CustomerController extends Controller
 
         $customer->delete();
 
-        return response()->json(['message' => 'Customer deleted successfully.']);
+        return response()->json([
+            'message' => 'Customer deleted successfully.',
+        ]);
     }
 }

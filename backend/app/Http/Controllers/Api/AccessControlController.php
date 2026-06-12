@@ -11,6 +11,7 @@ use Illuminate\Support\Str;
 use Spatie\Permission\Models\Permission;
 use Spatie\Permission\Models\Role;
 use Spatie\Permission\PermissionRegistrar;
+use Illuminate\Validation\Rule;
 
 class AccessControlController extends Controller
 {
@@ -151,4 +152,44 @@ class AccessControlController extends Controller
             ], 500);
         }
     }
+    // Add these two methods to AccessControlController
+
+public function getUserPermissions(User $user): JsonResponse
+{
+    return response()->json([
+        'data' => [
+            'user_id'             => $user->user_id,
+            'full_name'           => $user->full_name,
+            'role'                => $user->role,
+            'role_permissions'    => $user->getPermissionsViaRoles()->pluck('name')->sort()->values(),
+            'direct_permissions'  => $user->getDirectPermissions()->pluck('name')->sort()->values(),
+            'all_permissions'     => $user->getAllPermissions()->pluck('name')->sort()->values(),
+        ],
+    ]);
+}
+
+public function updateUserPermissions(Request $request, User $user): JsonResponse
+{
+    $request->validate([
+        'permissions' => ['required', 'array'],
+        'permissions.*' => ['string', 'exists:permissions,name'],
+    ]);
+
+    // Only sync DIRECT permissions — role permissions stay untouched
+    $user->syncPermissions($request->permissions);
+
+    app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+    return response()->json([
+        'message' => 'User permissions updated successfully.',
+        'data' => [
+            'user_id'            => $user->user_id,
+            'full_name'          => $user->full_name,
+            'role'               => $user->role,
+            'role_permissions'   => $user->getPermissionsViaRoles()->pluck('name')->sort()->values(),
+            'direct_permissions' => $user->getDirectPermissions()->pluck('name')->sort()->values(),
+            'all_permissions'    => $user->getAllPermissions()->pluck('name')->sort()->values(),
+        ],
+    ]);
+}
 }

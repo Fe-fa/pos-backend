@@ -10,7 +10,12 @@ class AssignUserRoleRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()?->hasRole(User::ROLE_ADMIN, 'sanctum') ?? false;
+        $user = $this->user();
+        if (!$user) return false;
+
+        // Check role column OR Spatie role — whichever is set
+        return $user->role === User::ROLE_ADMIN
+            || $user->hasRole(User::ROLE_ADMIN, 'sanctum');
     }
 
     public function rules(): array
