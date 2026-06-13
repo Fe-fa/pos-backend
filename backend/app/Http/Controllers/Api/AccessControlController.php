@@ -7,11 +7,11 @@ use App\Http\Requests\AccessControl\AssignUserRoleRequest;
 use App\Http\Requests\AccessControl\UpdateRolePermissionsRequest;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Spatie\Permission\Models\Permission;
 use Spatie\Permission\Models\Role;
 use Spatie\Permission\PermissionRegistrar;
-use Illuminate\Validation\Rule;
 
 class AccessControlController extends Controller
 {
@@ -34,9 +34,9 @@ class AccessControlController extends Controller
             ->where('guard_name', self::GUARD)
             ->orderBy('name')
             ->get()
-            ->map(fn ($permission) => [
-                'name' => $permission->name,
-                'label' => Str::of($permission->name)->replace('.', ' ')->title()->toString(),
+            ->map(fn($p) => [
+                'name'  => $p->name,
+                'label' => Str::of($p->name)->replace('.', ' ')->title()->toString(),
             ])
             ->values();
 
@@ -45,44 +45,39 @@ class AccessControlController extends Controller
             ->whereIn('name', self::ALL_ROLES)
             ->with('permissions:id,name')
             ->get()
-            ->sortBy(fn ($role) => array_search($role->name, self::ALL_ROLES, true))
+            ->sortBy(fn($role) => array_search($role->name, self::ALL_ROLES, true))
             ->values()
-            ->map(fn ($role) => [
-                'name' => $role->name,
+            ->map(fn($role) => [
+                'name'        => $role->name,
                 'permissions' => $role->permissions->pluck('name')->sort()->values(),
             ])
             ->values();
 
         $users = User::query()
-            ->with([
-                'stores:store_id,store_name',
-                'roles:id,name',
-            ])
+            ->with(['stores:store_id,store_name', 'roles:id,name'])
             ->orderByDesc('user_id')
             ->get()
             ->map(function ($user) {
-                $fullName = $user->full_name
-                    ?? trim(($user->first_name ?? '') . ' ' . ($user->last_name ?? ''))
-                    ?: ($user->name ?? $user->email);
-
                 return [
-                    'user_id' => $user->user_id,
-                    'full_name' => $fullName,
-                    'email' => $user->email,
-                    'role' => $user->roles->pluck('name')->first() ?? $user->role ?? null,
-                    'stores' => $user->stores->map(fn ($store) => [
-                        'store_id' => $store->store_id,
-                        'store_name' => $store->store_name,
+                    'user_id'   => $user->user_id,
+                    'full_name' => $user->full_name
+                        ?? trim(($user->first_name ?? '') . ' ' . ($user->last_name ?? ''))
+                        ?: ($user->name ?? $user->email),
+                    'email'  => $user->email,
+                    'role'   => $user->roles->pluck('name')->first() ?? $user->role ?? null,
+                    'stores' => $user->stores->map(fn($s) => [
+                        'store_id'   => $s->store_id,
+                        'store_name' => $s->store_name,
                     ])->values(),
                 ];
             })
             ->values();
 
         return response()->json([
-            'message' => 'Access control data retrieved successfully.',
+            'message'     => 'Access control data retrieved successfully.',
             'permissions' => $permissions,
-            'roles' => $roles,
-            'users' => $users,
+            'roles'       => $roles,
+            'users'       => $users,
         ]);
     }
 
@@ -97,26 +92,27 @@ class AccessControlController extends Controller
         }
 
         try {
-            $validated = $request->validated();
-
             $role = Role::findByName($roleName, self::GUARD);
-            $role->syncPermissions($validated['permissions'] ?? []);
+            $role->syncPermissions($request->validated()['permissions'] ?? []);
 
             app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+            // Revoke tokens for all users with this role so they re-login with fresh permissions
+            User::role($roleName)->each(fn($u) => $u->tokens()->delete());
 
             $role->load('permissions:id,name');
 
             return response()->json([
                 'message' => ucfirst($roleName) . ' permissions updated successfully.',
-                'data' => [
-                    'name' => $role->name,
+                'data'    => [
+                    'name'        => $role->name,
                     'permissions' => $role->permissions->pluck('name')->sort()->values(),
                 ],
             ]);
         } catch (\Throwable $e) {
             return response()->json([
                 'message' => 'Failed to update role permissions.',
-                'error' => $e->getMessage(),
+                'error'   => $e->getMessage(),
             ], 500);
         }
     }
@@ -127,69 +123,87 @@ class AccessControlController extends Controller
     ): JsonResponse {
         try {
             $roleName = $request->validated()['role'];
-            $role = Role::findByName($roleName, self::GUARD);
+            $role     = Role::findByName($roleName, self::GUARD);
 
             $user->syncRoles([$role]);
 
-            if ($user->isFillable('role')) {
-                $user->role = $role->name;
-                $user->save();
-            }
+            // Keep role column in sync
+            $user->forceFill(['role' => $role->name])->save();
 
             app(PermissionRegistrar::class)->forgetCachedPermissions();
 
+            // Revoke tokens so user re-logins with the new role's permissions
+            $user->tokens()->delete();
+
             return response()->json([
                 'message' => 'User role assigned successfully.',
-                'data' => [
+                'data'    => [
                     'user_id' => $user->user_id,
-                    'role' => $role->name,
+                    'role'    => $role->name,
                 ],
             ]);
         } catch (\Throwable $e) {
             return response()->json([
                 'message' => 'Failed to assign user role.',
-                'error' => $e->getMessage(),
+                'error'   => $e->getMessage(),
             ], 500);
         }
     }
-    // Add these two methods to AccessControlController
 
-public function getUserPermissions(User $user): JsonResponse
-{
-    return response()->json([
-        'data' => [
-            'user_id'             => $user->user_id,
-            'full_name'           => $user->full_name,
-            'role'                => $user->role,
-            'role_permissions'    => $user->getPermissionsViaRoles()->pluck('name')->sort()->values(),
-            'direct_permissions'  => $user->getDirectPermissions()->pluck('name')->sort()->values(),
-            'all_permissions'     => $user->getAllPermissions()->pluck('name')->sort()->values(),
-        ],
-    ]);
-}
+    public function getUserPermissions(User $user): JsonResponse
+    {
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+        $user->unsetRelation('roles')->unsetRelation('permissions');
 
-public function updateUserPermissions(Request $request, User $user): JsonResponse
-{
-    $request->validate([
-        'permissions' => ['required', 'array'],
-        'permissions.*' => ['string', 'exists:permissions,name'],
-    ]);
+        return response()->json([
+            'data' => [
+                'user_id'            => $user->user_id,
+                'full_name'          => $user->full_name,
+                'role'               => $user->role,
+                'role_permissions'   => $user->getPermissionsViaRoles()->pluck('name')->sort()->values(),
+                'direct_permissions' => $user->getDirectPermissions()->pluck('name')->sort()->values(),
+                'all_permissions'    => $user->getAllPermissions()->pluck('name')->sort()->values(),
+            ],
+        ]);
+    }
 
-    // Only sync DIRECT permissions — role permissions stay untouched
-    $user->syncPermissions($request->permissions);
+    public function updateUserPermissions(Request $request, User $user): JsonResponse
+    {
+        $request->validate([
+            'permissions'   => ['required', 'array'],
+            'permissions.*' => [
+                'string',
+                'exists:permissions,name',
+            ],
+        ]);
 
-    app(PermissionRegistrar::class)->forgetCachedPermissions();
+        // Only assign permissions the user doesn't already have via their role
+        // This prevents direct permissions conflicting with role permissions
+        $rolePermissions   = $user->getPermissionsViaRoles()->pluck('name');
+        $directPermissions = collect($request->permissions)
+            ->diff($rolePermissions)
+            ->values()
+            ->all();
 
-    return response()->json([
-        'message' => 'User permissions updated successfully.',
-        'data' => [
-            'user_id'            => $user->user_id,
-            'full_name'          => $user->full_name,
-            'role'               => $user->role,
-            'role_permissions'   => $user->getPermissionsViaRoles()->pluck('name')->sort()->values(),
-            'direct_permissions' => $user->getDirectPermissions()->pluck('name')->sort()->values(),
-            'all_permissions'    => $user->getAllPermissions()->pluck('name')->sort()->values(),
-        ],
-    ]);
-}
+        $user->syncPermissions($directPermissions);
+
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+        // Revoke tokens so user re-logins with updated permissions
+        $user->tokens()->delete();
+
+        $user->unsetRelation('roles')->unsetRelation('permissions');
+
+        return response()->json([
+            'message' => 'User permissions updated successfully.',
+            'data'    => [
+                'user_id'            => $user->user_id,
+                'full_name'          => $user->full_name,
+                'role'               => $user->role,
+                'role_permissions'   => $user->getPermissionsViaRoles()->pluck('name')->sort()->values(),
+                'direct_permissions' => $user->getDirectPermissions()->pluck('name')->sort()->values(),
+                'all_permissions'    => $user->getAllPermissions()->pluck('name')->sort()->values(),
+            ],
+        ]);
+    }
 }

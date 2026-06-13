@@ -51,6 +51,7 @@ class RolePermissionSeeder extends Seeder
             'billings.manage',
             'orders.manage',
             'payments.charge',
+            'payments.manage', 
 
             // ── POS actions ───────────────────────────────────────────
             'pos.access',
@@ -109,6 +110,7 @@ class RolePermissionSeeder extends Seeder
             'payments.charge',
             'pos.access',
             'pos.draft',
+            'payments.manage',
         ];
 
         foreach ($allPermissions as $permission) {

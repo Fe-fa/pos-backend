@@ -23,7 +23,7 @@ class User extends Authenticatable implements MustVerifyEmail
 
     protected $table = 'users';
     protected $primaryKey = 'user_id';
-    protected string $guard_name = 'sanctum';
+    protected $guard_name = 'sanctum';
 
     protected $fillable = [
         'first_name',
@@ -64,10 +64,10 @@ class User extends Authenticatable implements MustVerifyEmail
         'password' => 'hashed',
     ];
 
-    public function getDefaultGuardName(): string
-    {
-        return $this->guard_name;
-    }
+public function getDefaultGuardName(): string
+{
+    return 'sanctum';
+}
 
     public function getRouteKeyName(): string
     {

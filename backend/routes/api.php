@@ -14,6 +14,7 @@ use App\Http\Controllers\Api\AccessControlController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\PublicDocumentController;
 use App\Http\Controllers\Api\PosDashboardController;
+use App\Http\Controllers\Api\RewardRuleController;
 
 Route::prefix('auth')->group(function () {
     Route::post('/register', [AuthController::class, 'register'])->name('auth.register');
@@ -72,6 +73,14 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('billings/{billing}/items', [BillingItemController::class, 'store'])->name('billings.items.store');
 
     Route::post('billings/{billing}/charge', [PaymentController::class, 'charge'])->name('billings.charge');
+
+        Route::prefix('reward-rules')->group(function () {
+        Route::get('/',                 [RewardRuleController::class, 'index']);
+        Route::post('/',                [RewardRuleController::class, 'store']);
+        Route::put('/{rewardRule}',     [RewardRuleController::class, 'update']);
+        Route::delete('/{rewardRule}',  [RewardRuleController::class, 'destroy']);
+        Route::get('/customer-loyalty', [RewardRuleController::class, 'customerLoyalty']);
+    });
 });
 
 Route::get('public/documents/{mode}/{uuid}', [PublicDocumentController::class, 'show'])
