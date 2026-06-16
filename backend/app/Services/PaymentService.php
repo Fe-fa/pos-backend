@@ -3,9 +3,9 @@
 namespace App\Services;
 
 use App\Models\Billing;
+use App\Models\Customer;
 use App\Models\Payment;
 use App\Models\User;
-use App\Models\Customer;
 use Illuminate\Support\Facades\DB;
 
 class PaymentService
@@ -38,7 +38,7 @@ class PaymentService
                 ], 422));
             }
 
-            // Finalize billing once only.
+            // Finalize billing once only
             $billing = $this->billingService->finalizeIfNeeded($billing, $user);
 
             // Re-lock and refresh after finalization
@@ -47,77 +47,165 @@ class PaymentService
                 ->lockForUpdate()
                 ->firstOrFail();
 
-            $billing = $this->billingService->recalculateTotals($billing);
+            // $billing = $this->billingService->recalculateTotals($billing);
+            $billing->loadMissing('items.product');
 
-            // ✅ ADD HERE — redeem loyalty points and apply discount before payment distribution
-            if (!empty($data['points_redeemed']) && $data['points_redeemed'] > 0 && $billing->customer_id) {
-                try {
-                    $redemption = $this->loyaltyService->redeemPoints(
-                        storeId:        (int) $billing->store_id,
-                        customerId:     (int) $billing->customer_id,
-                        billingId:      (int) $billing->billing_id,
-                        pointsToRedeem: (int) $data['points_redeemed'],
-                    );
-                    // Reduce the bill total by the discount
-                    $discountAmount = $redemption['discount_amount'];
-                    $billing->update([
-                        'total'       => max($billing->total - $discountAmount, 0),
-                        'balance_due' => max($billing->balance_due - $discountAmount, 0),
-                    ]);
-                    $billing = $billing->fresh();
-                } catch (\Throwable $e) {
-                    abort(response()->json(['message' => $e->getMessage()], 422));
-                }
-            }
+$pointsDiscount = 0.00;  // ← initialize before the validation block too
+
+$pointsToRedeem = (int) ($data['points_redeemed'] ?? 0);
+
+
+if ($pointsToRedeem < 0) {
+    abort(response()->json(['message' => 'Points to redeem cannot be negative.'], 422));
+}
+
+if ($pointsToRedeem > 0 && $billing->customer_id) {
+    $customerPoints = $this->loyaltyService->getCustomerPoints(
+        (int) $billing->store_id,
+        (int) $billing->customer_id
+    );
+
+    if ($pointsToRedeem > $customerPoints) {
+        abort(response()->json([
+            'message' => 'Points redeemed exceed customer available balance.',
+        ], 422));
+    }
+
+    $activeRule   = $this->loyaltyService->getActiveRule((int) $billing->store_id);
+    $pointValue   = (float) ($activeRule?->point_value ?? 1);
+    $maxByInvoice = (int) floor((float) $billing->total / $pointValue);
+
+    if ($pointsToRedeem > $maxByInvoice) {
+        abort(response()->json([
+            'message' => 'Points redeemed would exceed the invoice total.',
+        ], 422));
+    }
+}
+
+// Redeem loyalty points before payment distribution
+if ($pointsToRedeem > 0 && $billing->customer_id) {
+    try {
+        $redemption = $this->loyaltyService->redeemPoints(
+            storeId:        (int) $billing->store_id,
+            customerId:     (int) $billing->customer_id,
+            billingId:      (int) $billing->billing_id,
+            pointsToRedeem: $pointsToRedeem,
+        );
+
+        $pointsDiscount = (float) $redemption['discount_amount'];
+
+        $billing->update([
+            'total'            => max((float) $billing->total - $pointsDiscount, 0),
+            'balance_due'      => max((float) $billing->balance_due - $pointsDiscount, 0),
+            'points_discount'  => $pointsDiscount,
+        ]);
+
+        $billing = $billing->fresh();
+        $billing->loadMissing('items.product');
+    } catch (\Throwable $e) {
+        abort(response()->json(['message' => $e->getMessage()], 422));
+    }
+}
+// After the points redemption block, before $method = $data['payment_method']:
+
+$billing = $billing->fresh();
+$billing->loadMissing('items.product');
+
+// Fully covered by loyalty points — mark as paid and skip payment allocation
+if ((float) $billing->balance_due <= 0) {
+    $billing->update([
+        'paid_amount' => (float) $billing->total,
+        'balance_due' => 0,
+        'status'      => 'paid',
+        'is_draft'    => false,
+    ]);
+
+    $payment = Payment::create([
+        'billing_id'      => $billing->billing_id,
+        'receiptnumber'   => $this->documentNumberService->nextNumber($billing->store_id, 'Receipt'),
+        'payment_method'  => $data['payment_method'],
+        'amount_received' => 0,
+        'amount_tendered' => 0,
+        'change_returned' => 0,
+        'balance_before'  => 0,
+        'balance_after'   => 0,
+        'payment_date'    => now(),
+    ]);
+
+    if (!empty($billing->customer_id)) {
+        $freshBalance = round((float) Billing::where('customer_id', $billing->customer_id)
+            ->where('status', '!=', 'paid')
+            ->where('is_draft', false)
+            ->sum('balance_due'), 2);
+
+        Customer::where('customer_id', $billing->customer_id)
+            ->update(['current_balance' => $freshBalance]);
+
+        try {
+            $this->loyaltyService->earnPoints(
+                storeId:    (int) $billing->store_id,
+                customerId: (int) $billing->customer_id,
+                billingId:  (int) $billing->billing_id,
+                saleAmount: (float) $billing->total,
+            );
+        } catch (\Throwable $e) {
+            \Log::warning('Loyalty points earn failed: ' . $e->getMessage());
+        }
+    }
+
+    return $payment->load(['billing.customer', 'billing.store', 'billing.user']);
+}
+
 
             $method     = $data['payment_method'];
             $customerId = $billing->customer_id;
 
-            // 1. Isolate debt retrieval STRICTLY to this specific customer
+            // Isolate debt retrieval strictly to this customer
             if (empty($customerId)) {
                 $allCustomerBillings = collect([$billing]);
                 $previousDebtsSum    = 0.00;
             } else {
-                // Get previous unpaid balances excluding the current active checkout record
-                $previousDebtsSum = round((float) Billing::where('customer_id', $customerId)
-                    ->where('billing_id', '!=', $billing->billing_id)
-                    ->where('status', '!=', 'paid')
-                    ->sum('balance_due'), 2);
+$previousDebtsSum = round((float) Billing::where('customer_id', $customerId)
+    ->where('billing_id', '!=', $billing->billing_id)
+    ->where('status', '!=', 'paid')
+    ->where('is_draft', false) 
+    ->sum('balance_due'), 2);
 
-                $allCustomerBillings = Billing::where('customer_id', $customerId)
-                    ->where('status', '!=', 'paid')
-                    ->lockForUpdate()
-                    ->get();
+  $allCustomerBillings = Billing::where('customer_id', $customerId)
+    ->where('status', '!=', 'paid')
+    ->where('is_draft', false) 
+    ->lockForUpdate()
+    ->get();
             }
 
             $totalCombinedBalance = round((float) $allCustomerBillings->sum('balance_due'), 2);
 
-            // 2. Get raw monetary values handed over by the customer
             $rawTendered = array_key_exists('amount_tendered', $data)
                 ? round((float) $data['amount_tendered'], 2)
                 : round((float) $data['amount_received'], 2);
 
             if ($rawTendered <= 0) {
-                abort(response()->json(['message' => 'Amount tendered must be greater than zero.'], 422));
+                abort(response()->json([
+                    'message' => 'Amount tendered must be greater than zero.',
+                ], 422));
             }
 
             if ($totalCombinedBalance <= 0) {
-                abort(response()->json(['message' => 'This customer has no outstanding balances due.'], 422));
+                abort(response()->json([
+                    'message' => 'This customer has no outstanding balances due.',
+                ], 422));
             }
 
-            // 3. Track cash distribution variables
-            $moneyLeftToAllocate = $rawTendered;
-            $globalChangeReturned = 0.00;
+            $moneyLeftToAllocate   = $rawTendered;
+            $globalChangeReturned  = 0.00;
 
-            // Change is now strictly calculated from: Tendered - (Current Invoice + Outstanding Customer Balances)
             if ($method === 'cash' && $rawTendered > $totalCombinedBalance) {
                 $globalChangeReturned = round($rawTendered - $totalCombinedBalance, 2);
             }
 
-            $sortedBillings      = $allCustomerBillings->sortBy('created_at');
+            $sortedBillings       = $allCustomerBillings->sortBy('created_at');
             $primaryPaymentRecord = null;
 
-            // 4. Distribute the payment across the customer's ledger entries
             foreach ($sortedBillings as $currentBill) {
                 if ($moneyLeftToAllocate <= 0) {
                     break;
@@ -125,7 +213,7 @@ class PaymentService
 
                 $billBalanceBefore = round((float) $currentBill->balance_due, 2);
                 $paymentToApply    = min($moneyLeftToAllocate, $billBalanceBefore);
-                $isCurrentInvoice  = ($currentBill->billing_id === $billing->billing_id);
+                $isCurrentInvoice  = ((int) $currentBill->billing_id === (int) $billing->billing_id);
 
                 $payment = Payment::create([
                     'billing_id'      => $currentBill->billing_id,
@@ -143,7 +231,7 @@ class PaymentService
                     $primaryPaymentRecord = $payment;
                 }
 
-                $paid    = round((float) $currentBill->payments()->sum('amount_received'), 2);
+                $paid = round((float) $currentBill->payments()->sum('amount_received'), 2);
                 $balance = round(max((float) $currentBill->total - $paid, 0), 2);
 
                 $currentBill->update([
@@ -169,23 +257,23 @@ class PaymentService
                 $moneyLeftToAllocate -= $paymentToApply;
             }
 
-            // 5. Synchronize the physical 'current_balance' column on the customers table
+            // Sync physical current_balance
             if (!empty($customerId)) {
-                $freshCustomerBalance = round((float) Billing::where('customer_id', $customerId)
-                    ->where('status', '!=', 'paid')
-                    ->sum('balance_due'), 2);
+$freshCustomerBalance = round((float) Billing::where('customer_id', $customerId)
+    ->where('status', '!=', 'paid')
+    ->where('is_draft', false) // ← add this
+    ->sum('balance_due'), 2);
 
                 Customer::where('customer_id', $customerId)->update([
                     'current_balance' => $freshCustomerBalance,
                 ]);
             }
 
-            // Add runtime data string attributes to return object payload
             $freshPayment = $primaryPaymentRecord->fresh();
             $currentInvoiceBalance = round((float) $billing->balance_due, 2);
             $freshPayment->balance_calculation_label = "+{$currentInvoiceBalance}/+{$previousDebtsSum}";
 
-            // 6. Earn loyalty points if customer is attached (non-critical)
+            // Earn loyalty points
             if (!empty($customerId)) {
                 try {
                     $this->loyaltyService->earnPoints(
@@ -195,28 +283,50 @@ class PaymentService
                         saleAmount: (float) $billing->total,
                     );
                 } catch (\Throwable $e) {
-                    // Non-critical — log but don't fail the payment
-                    \Log::warning("Loyalty points earn failed: " . $e->getMessage());
+                    \Log::warning('Loyalty points earn failed: ' . $e->getMessage());
                 }
             }
-            // At the end of charge(), after earnPoints, add Chapa 5:
 
-// 7. Apply Chapa 5 punch card if enabled (non-critical)
-if (!empty($customerId)) {
-    try {
-        // Count total items in this billing
-        $totalItems = $billing->items->sum('quantity');
+            // Apply SKU-based Chapa 5 using only qualifying paid SKU lines
+            // Excludes free claimed reward lines (unit_price <= 0 or total_amount <= 0)
+            if (!empty($customerId)) {
+                try {
+                    $rule = $this->loyaltyService->getActiveRule((int) $billing->store_id);
 
-        $this->loyaltyService->applyChapa5(
-            storeId:     (int) $billing->store_id,
-            customerId:  (int) $customerId,
-            billingId:   (int) $billing->billing_id,
-            itemsBought: (int) $totalItems,
-        );
-    } catch (\Throwable $e) {
-        \Log::warning("Chapa 5 apply failed: " . $e->getMessage());
-    }
-}
+                    if ($rule && $rule->chapa5_enabled && filled($rule->chapa5_product_sku)) {
+                        $promoSku = strtolower(trim((string) $rule->chapa5_product_sku));
+
+                        $qualifyingQty = (int) $billing->items
+                            ->filter(function ($item) use ($promoSku) {
+                                $itemSku = strtolower(trim((string) data_get($item, 'product.sku')));
+                                $qty = (int) ($item->quantity ?? 0);
+                                $unitPrice = (float) ($item->unit_price ?? 0);
+                                $lineTotal = (float) ($item->total_amount ?? ($qty * $unitPrice));
+
+                                return $itemSku !== ''
+                                    && $itemSku === $promoSku
+                                    && $qty > 0
+                                    && $unitPrice > 0
+                                    && $lineTotal > 0;
+                            })
+                            ->sum(function ($item) {
+                                return (int) ($item->quantity ?? 0);
+                            });
+
+                        if ($qualifyingQty > 0) {
+                            $this->loyaltyService->applyChapa5(
+                                storeId:    (int) $billing->store_id,
+                                customerId: (int) $customerId,
+                                billingId:  (int) $billing->billing_id,
+                                sku:        $rule->chapa5_product_sku,
+                                itemsBought:(int) $qualifyingQty,
+                            );
+                        }
+                    }
+                } catch (\Throwable $e) {
+                    \Log::warning('Chapa 5 apply failed: ' . $e->getMessage());
+                }
+            }
 
             return $freshPayment->load([
                 'billing.customer',

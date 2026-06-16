@@ -33,6 +33,7 @@ class Billing extends Model
         'notes',
         'fulfillment_status',
         'fulfillment_type',
+        'points_discount',
     ];
 
     protected $appends = [
@@ -45,6 +46,7 @@ class Billing extends Model
         'total' => 'decimal:2',
         'paid_amount' => 'decimal:2',
         'balance_due' => 'decimal:2',
+        'points_discount'  => 'decimal:2', 
         'is_draft' => 'boolean',
         'stock_applied_at' => 'datetime',
         'billing_date' => 'datetime',

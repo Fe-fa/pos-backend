@@ -45,9 +45,10 @@ class CustomerController extends Controller
         $perPage = max(1, min((int) $request->get('per_page', 4), 50));
 
         $query = Customer::query()
-            ->withSum(['billings as dynamic_balance' => function ($subQuery) {
-                $subQuery->where('status', '!=', 'paid');
-            }], 'balance_due');
+->withSum(['billings as dynamic_balance' => function ($subQuery) {
+    $subQuery->where('status', '!=', 'paid')
+             ->where('is_draft', false); // ← exclude drafts
+}], 'balance_due');
 
         if (!$user->isAdmin()) {
             $query->whereIn('store_id', $this->allowedStoreIds($user));
@@ -107,9 +108,10 @@ class CustomerController extends Controller
     {
         $this->authorizeStoreAccess(request()->user(), $customer->store_id);
 
-        $customer->loadSum(['billings as dynamic_balance' => function ($query) {
-            $query->where('status', '!=', 'paid');
-        }], 'balance_due');
+$customer->loadSum(['billings as dynamic_balance' => function ($query) {
+    $query->where('status', '!=', 'paid')
+          ->where('is_draft', false); // ← exclude drafts
+}], 'balance_due');
 
         $customer->loadCount('billings');
 
@@ -133,9 +135,10 @@ class CustomerController extends Controller
 
         $updatedCustomer = $customer->fresh();
 
-        $updatedCustomer->loadSum(['billings as dynamic_balance' => function ($query) {
-            $query->where('status', '!=', 'paid');
-        }], 'balance_due');
+$updatedCustomer->loadSum(['billings as dynamic_balance' => function ($query) {
+    $query->where('status', '!=', 'paid')
+          ->where('is_draft', false); // ← exclude drafts
+}], 'balance_due');
 
         $updatedCustomer->current_balance = round((float) ($updatedCustomer->dynamic_balance ?? 0.00), 2);
         unset($updatedCustomer->dynamic_balance);

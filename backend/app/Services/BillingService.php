@@ -194,7 +194,12 @@ class BillingService
 
         $subtotal   = (float) $billing->items->sum('line_subtotal');
         $vatAmount  = (float) $billing->items->sum('vat_amount');
-        $total      = $subtotal + $vatAmount;
+        $grossTotal      = $subtotal + $vatAmount;
+        
+        $pointsDiscount = (float) ($billing->points_discount ?? 0);
+    $total      = max($grossTotal - $pointsDiscount, 0);
+
+
         $paidAmount = (float) $billing->payments()->sum('amount_received');
         $balanceDue = max($total - $paidAmount, 0);
 

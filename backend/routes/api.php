@@ -80,6 +80,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/{rewardRule}',     [RewardRuleController::class, 'update']);
         Route::delete('/{rewardRule}',  [RewardRuleController::class, 'destroy']);
         Route::get('/customer-loyalty', [RewardRuleController::class, 'customerLoyalty']);
+        Route::post('/claim-chapa5', [RewardRuleController::class, 'claimChapa5']);
     });
 });
 

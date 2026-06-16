@@ -7,26 +7,36 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class RewardRule extends Model
 {
-    protected $table    = 'reward_rules';
+    protected $table = 'reward_rules';
+
     protected $fillable = [
-        'store_id', 'rule_name',
-        'points_per_shilling', 'min_spend_required',
-        'point_value', 'min_redemption_points',
-        'is_active', 'start_date', 'end_date',
+        'store_id',
+        'rule_name',
+        'points_per_shilling',
+        'min_spend_required',
+        'point_value',
+        'min_redemption_points',
+        'is_active',
+        'start_date',
+        'end_date',
+
         // Chapa 5
-        'chapa5_enabled', 'chapa5_buy_count',
-        'chapa5_free_count', 'chapa5_label',
+        'chapa5_enabled',
+        'chapa5_product_sku',
+        'chapa5_buy_count',
+        'chapa5_free_count',
+        'chapa5_label',
     ];
 
     protected $casts = [
-        'is_active'           => 'boolean',
-        'chapa5_enabled'      => 'boolean',
-        'chapa5_buy_count'    => 'integer',
-        'chapa5_free_count'   => 'integer',
-        'start_date'          => 'datetime',
-        'end_date'            => 'datetime',
+        'is_active' => 'boolean',
+        'chapa5_enabled' => 'boolean',
+        'chapa5_buy_count' => 'integer',
+        'chapa5_free_count' => 'integer',
+        'start_date' => 'datetime',
+        'end_date' => 'datetime',
         'points_per_shilling' => 'decimal:4',
-        'point_value'         => 'decimal:4',
+        'point_value' => 'decimal:4',
     ];
 
     public function store(): BelongsTo

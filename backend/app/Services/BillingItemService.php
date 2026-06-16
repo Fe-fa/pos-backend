@@ -22,6 +22,27 @@ class BillingItemService
             ], 422));
         }
 
+if (isset($data['unit_price']) && (float) $data['unit_price'] <= 0) {
+            $existingFreeItem = $billing->items()
+                ->where('product_id', $data['product_id'])
+                ->where('unit_price', '<=', 0)
+                ->first();
+
+            if ($existingFreeItem) {
+                $newQty = (int) $existingFreeItem->quantity + (int) ($data['quantity'] ?? 1);
+
+                if ($newQty <= 0) {
+                    $this->deleteItem($existingFreeItem);
+                    return $existingFreeItem;
+                }
+
+                return $this->updateItem($existingFreeItem, [
+                    'quantity'   => $newQty,
+                    'unit_price' => 0,
+                ]);
+            }
+        }
+
         $product = Product::query()->findOrFail($data['product_id']);
 
         if (!$product->is_active) {
