@@ -18,114 +18,143 @@ class InventoryController extends Controller
 
     public function __construct(private readonly InventoryService $service) {}
 
-    public function index(Request $request): JsonResponse
-    {
-        $perPage = max(1, (int) ($request->per_page ?? 10));
-        $user = $request->user();
+public function index(Request $request): JsonResponse
+{
+    $perPage = max(1, min((int) ($request->per_page ?? 10), 100));
+    $user    = $request->user();
 
-        $query = Inventory::query()
-            ->with(['store', 'product.category']);
-
-        if (!$user->isAdmin() && !$user->can('stores.manage')) {
-            $storeIds = $user->stores()
-                ->pluck('stores.store_id')
-                ->push($user->default_store_id)
-                ->filter()
-                ->unique()
-                ->values();
-
-            $query->whereIn('store_id', $storeIds);
-        }
-
-        $query
-            ->when($request->store_id, function ($q, $storeId) {
-                $q->where('store_id', $storeId);
-            })
-            ->when($request->search, function ($q, $search) {
-                $search = trim($search);
-                $q->where(function ($sub) use ($search) {
-                    $sub->whereHas('product', function ($pq) use ($search) {
-                        $pq->where('product_name', 'like', "%{$search}%")
-                            ->orWhere('sku', 'like', "%{$search}%");
-                    })->orWhere('batch_no', 'like', "%{$search}%");
-                });
-            })
-            ->orderBy('product_id')
-            ->orderBy('created_at')
-            ->orderBy('inventory_id');
-
-        $inventories = $query->paginate($perPage);
-
-        return response()->json([
-            'data' => $inventories->items(),
-            'meta' => [
-                'current_page' => $inventories->currentPage(),
-                'last_page'    => $inventories->lastPage(),
-                'per_page'     => $inventories->perPage(),
-                'total'        => $inventories->total(),
-                'from'         => $inventories->firstItem(),
-                'to'           => $inventories->lastItem(),
-            ],
+    $query = Inventory::query()
+        ->select([
+            'inventory_id',
+            'store_id',
+            'product_id',
+            'batch_no',
+            'quantity',
+            'created_at',
+        ])
+        ->with([
+            'store:store_id,store_name',
+            'product:product_id,product_name,sku,category_id,image_url',
+            'product.category:category_id,category_name',
         ]);
+
+    if (!$user->isAdmin() && !$user->can('stores.manage')) {
+        $storeIds = $user->stores()
+            ->pluck('stores.store_id')
+            ->push($user->default_store_id)
+            ->filter()
+            ->unique()
+            ->values();
+
+        $query->whereIn('store_id', $storeIds);
     }
 
-    public function history(Request $request): JsonResponse
-    {
-        $perPage = max(1, (int) ($request->per_page ?? 10));
-        $user = $request->user();
-
-        $query = InventoryHistory::query()
-            ->with(['store', 'product', 'user']);
-
-        if (!$user->isAdmin() && !$user->can('stores.manage')) {
-            $storeIds = $user->stores()
-                ->pluck('stores.store_id')
-                ->push($user->default_store_id)
-                ->filter()
-                ->unique()
-                ->values();
-
-            $query->whereIn('store_id', $storeIds);
-        }
-
-        $query
-            ->when($request->store_id, function ($q, $storeId) {
-                $q->where('store_id', $storeId);
-            })
-            ->when($request->product_id, function ($q, $productId) {
-                $q->where('product_id', $productId);
-            })
-            ->when($request->change_type, function ($q, $changeType) {
-                $q->where('change_type', $changeType);
-            })
-            ->when($request->search, function ($q, $search) {
-                $search = trim($search);
-                $q->where(function ($sub) use ($search) {
-                    $sub->whereHas('product', function ($pq) use ($search) {
+    $query
+        ->when($request->store_id, fn($q, $storeId) =>
+            $q->where('store_id', $storeId)
+        )
+        ->when($request->search, function ($q, $search) {
+            $search = trim($search);
+            $q->where(function ($sub) use ($search) {
+                $sub->where('batch_no', 'like', "%{$search}%")
+                    ->orWhereHas('product', fn($pq) =>
                         $pq->where('product_name', 'like', "%{$search}%")
-                            ->orWhere('sku', 'like', "%{$search}%");
-                    })
-                    ->orWhere('batch_no', 'like', "%{$search}%")
-                    ->orWhere('reference', 'like', "%{$search}%");
-                });
-            })
-            ->orderByDesc('inventory_history_id');
+                           ->orWhere('sku', 'like', "%{$search}%")
+                    );
+            });
+        })
+        ->orderBy('product_id')
+        ->orderBy('created_at')
+        ->orderBy('inventory_id');
 
-        $histories = $query->paginate($perPage);
+    $inventories = $query->paginate($perPage);
 
-        return response()->json([
-            'data' => $histories->items(),
-            'meta' => [
-                'current_page' => $histories->currentPage(),
-                'last_page'    => $histories->lastPage(),
-                'per_page'     => $histories->perPage(),
-                'total'        => $histories->total(),
-                'from'         => $histories->firstItem(),
-                'to'           => $histories->lastItem(),
-            ],
+    return response()->json([
+        'data' => $inventories->items(),
+        'meta' => [
+            'current_page' => $inventories->currentPage(),
+            'last_page'    => $inventories->lastPage(),
+            'per_page'     => $inventories->perPage(),
+            'total'        => $inventories->total(),
+            'from'         => $inventories->firstItem(),
+            'to'           => $inventories->lastItem(),
+        ],
+    ]);
+}
+
+public function history(Request $request): JsonResponse
+{
+    $perPage = max(1, min((int) ($request->per_page ?? 10), 100));
+    $user    = $request->user();
+
+    $query = InventoryHistory::query()
+        ->select([
+            'inventory_history_id',
+            'store_id',
+            'product_id',
+            'user_id',
+            'batch_no',
+            'reference',
+            'change_type',
+            'quantity_before',
+            'quantity_changed',
+            'quantity_after',
+            'created_at',
+        ])
+        ->with([
+            'store:store_id,store_name',
+            'product:product_id,product_name,sku,image_url',
+            'user:user_id,first_name,last_name,email',
         ]);
+
+    if (!$user->isAdmin() && !$user->can('stores.manage')) {
+        $storeIds = $user->stores()
+            ->pluck('stores.store_id')
+            ->push($user->default_store_id)
+            ->filter()
+            ->unique()
+            ->values();
+
+        $query->whereIn('store_id', $storeIds);
     }
 
+    $query
+        ->when($request->store_id, fn($q, $storeId) =>
+            $q->where('store_id', $storeId)
+        )
+        ->when($request->product_id, fn($q, $productId) =>
+            $q->where('product_id', $productId)
+        )
+        ->when($request->change_type, fn($q, $changeType) =>
+            $q->where('change_type', $changeType)
+        )
+        ->when($request->search, function ($q, $search) {
+            $search = trim($search);
+            $q->where(function ($sub) use ($search) {
+                $sub->where('batch_no', 'like', "%{$search}%")
+                    ->orWhere('reference', 'like', "%{$search}%")
+                    ->orWhereHas('product', fn($pq) =>
+                        $pq->where('product_name', 'like', "%{$search}%")
+                           ->orWhere('sku', 'like', "%{$search}%")
+                    );
+            });
+        })
+        ->orderByDesc('inventory_history_id');
+
+    $histories = $query->paginate($perPage);
+
+    return response()->json([
+        'data' => $histories->items(),
+        'meta' => [
+            'current_page' => $histories->currentPage(),
+            'last_page'    => $histories->lastPage(),
+            'per_page'     => $histories->perPage(),
+            'total'        => $histories->total(),
+            'from'         => $histories->firstItem(),
+            'to'           => $histories->lastItem(),
+        ],
+    ]);
+}
     public function store(StoreInventoryRequest $request): JsonResponse
     {
         if ($error = $this->authorizePermission('inventory.manage')) return $error;

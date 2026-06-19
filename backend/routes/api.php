@@ -15,6 +15,8 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\PublicDocumentController;
 use App\Http\Controllers\Api\PosDashboardController;
 use App\Http\Controllers\Api\RewardRuleController;
+use App\Http\Controllers\Api\SuperAdminDashboardController;
+use App\Http\Controllers\Api\DashboardController;
 
 Route::prefix('auth')->group(function () {
     Route::post('/register', [AuthController::class, 'register'])->name('auth.register');
@@ -22,7 +24,6 @@ Route::prefix('auth')->group(function () {
     Route::post('/forgot-password', [AuthController::class, 'forgotPassword'])->name('auth.forgot');
     Route::post('/reset-password', [AuthController::class, 'resetPassword'])->name('auth.reset');
 });
-
 Route::middleware('auth:sanctum')->group(function () {
     Route::prefix('auth')->group(function () {
         Route::get('/me', [AuthController::class, 'me'])->name('auth.me');
@@ -32,7 +33,6 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/verify-email', [AuthController::class, 'verifyEmail'])->name('auth.verify');
         Route::post('/resend-verification', [AuthController::class, 'resendVerification'])->name('auth.resend');
 
-        // Session management
         Route::get('/sessions', [AuthController::class, 'sessions'])->name('auth.sessions.index');
         Route::delete('/sessions', [AuthController::class, 'revokeAllSessions'])->name('auth.sessions.destroyAll');
         Route::delete('/sessions/{sessionId}', [AuthController::class, 'revokeSession'])->name('auth.sessions.destroy');
@@ -81,7 +81,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/{rewardRule}',  [RewardRuleController::class, 'destroy']);
         Route::get('/customer-loyalty', [RewardRuleController::class, 'customerLoyalty']);
         Route::post('/claim-chapa5', [RewardRuleController::class, 'claimChapa5']);
-    });
+    }); 
+       Route::get('/dashboard/super-admin', [DashboardController::class, 'superAdmin'])
+        ->name('dashboard.super-admin');
 });
 
 Route::get('public/documents/{mode}/{uuid}', [PublicDocumentController::class, 'show'])

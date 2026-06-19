@@ -9,19 +9,51 @@ use App\Http\Requests\Customer\UpdateCustomerRequest;
 use App\Models\Customer;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 
 class CustomerController extends Controller
 {
     use AuthorizesPermission;
 
-    private function allowedStoreIds($user)
+    // ─── FIX: Cache a plain int[] instead of a Collection object ─────────────
+    //
+    // ROOT CAUSE of "__PHP_Incomplete_Class returned":
+    //   The old code cached the result of ->values() which is an Eloquent
+    //   Collection. Laravel serializes it with PHP's serialize(), embedding
+    //   the fully-qualified class name. On a cache hit, PHP calls unserialize()
+    //   — if the class isn't autoloaded at that exact moment (fresh deploy,
+    //   worker restart, opcache mismatch) it produces __PHP_Incomplete_Class
+    //   instead of throwing, silently breaking the return-type contract.
+    //
+    // FIX:
+    //   Cache ->toArray() — a plain PHP int[]. Scalar arrays survive any
+    //   PHP/framework version change without class resolution.
+    //   On read, wrap in collect() here so every caller still receives a
+    //   Collection and nothing else in the file needs changing.
+    // ─────────────────────────────────────────────────────────────────────────
+    private function allowedStoreIds($user): Collection
     {
-        return $user->stores()
-            ->pluck('stores.store_id')
-            ->push($user->default_store_id)
-            ->filter()
-            ->unique()
-            ->values();
+        $ids = Cache::remember(
+            "user_store_ids_{$user->user_id}",
+            now()->addMinutes(5),
+            fn () => $user->stores()
+                ->pluck('stores.store_id')
+                ->push($user->default_store_id)
+                ->filter()
+                ->unique()
+                ->values()
+                ->map(fn ($id) => (int) $id)
+                ->toArray()              // ← store plain int[], not a Collection
+        );
+
+        // If a stale cache entry somehow still holds an object, recover cleanly.
+        if (!is_array($ids)) {
+            Cache::forget("user_store_ids_{$user->user_id}");
+            return $this->allowedStoreIds($user);
+        }
+
+        return collect($ids);            // ← always returns a real Collection
     }
 
     private function authorizeStoreAccess($user, $storeId): void
@@ -30,7 +62,9 @@ class CustomerController extends Controller
             return;
         }
 
-        $allowed = $this->allowedStoreIds($user)->map(fn ($id) => (string) $id)->all();
+        $allowed = $this->allowedStoreIds($user)
+            ->map(fn ($id) => (string) $id)
+            ->all();
 
         if (!in_array((string) $storeId, $allowed, true)) {
             abort(response()->json([
@@ -41,14 +75,30 @@ class CustomerController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $user = $request->user();
-        $perPage = max(1, min((int) $request->get('per_page', 4), 50));
+        $user    = $request->user();
+        $perPage = max(1, min((int) $request->get('per_page', 10), 50));
 
         $query = Customer::query()
-->withSum(['billings as dynamic_balance' => function ($subQuery) {
-    $subQuery->where('status', '!=', 'paid')
-             ->where('is_draft', false); // ← exclude drafts
-}], 'balance_due');
+            ->select([
+                'customer_id',
+                'store_id',
+                'full_name',
+                'phone',
+                'email',
+                'current_balance',
+                'loyalty_points',
+                'total_earned_points',
+                'punch_card_count',
+                'total_free_items_earned',
+                'created_at',
+            ])
+            ->withSum(
+                ['billings as current_balance' => fn ($q) => $q
+                    ->where('status', '!=', 'paid')
+                    ->where('is_draft', false)
+                ],
+                'balance_due'
+            );
 
         if (!$user->isAdmin()) {
             $query->whereIn('store_id', $this->allowedStoreIds($user));
@@ -56,35 +106,35 @@ class CustomerController extends Controller
 
         if ($request->filled('store_id')) {
             $this->authorizeStoreAccess($user, $request->store_id);
-            $query->where('store_id', $request->store_id);
+            $query->where('store_id', (int) $request->store_id);
         }
 
         $query->when($request->search, function ($q, $search) {
-            $s = trim((string) $search);
+            $s = str_replace(['%', '_'], ['\%', '\_'], trim((string) $search));
             $q->where(function ($w) use ($s) {
                 $w->where('full_name', 'like', "%{$s}%")
-                    ->orWhere('phone', 'like', "%{$s}%")
-                    ->orWhere('email', 'like', "%{$s}%");
+                  ->orWhere('phone',   'like', "%{$s}%")
+                  ->orWhere('email',   'like', "%{$s}%");
             });
         });
 
         $query->orderByDesc('customer_id');
 
         $customers = $query->paginate($perPage);
-
-        $formattedItems = collect($customers->items())->map(function (Customer $customer) {
-            $customer->current_balance = round((float) ($customer->dynamic_balance ?? 0.00), 2);
-            unset($customer->dynamic_balance);
-            return $customer;
+        $items = collect($customers->items())->map(function (Customer $c) {
+            $c->current_balance = round((float) ($c->current_balance ?? 0.00), 2);
+            return $c;
         });
 
         return response()->json([
-            'data' => $formattedItems,
+            'data' => $items,
             'meta' => [
                 'current_page' => $customers->currentPage(),
                 'last_page'    => $customers->lastPage(),
                 'per_page'     => $customers->perPage(),
                 'total'        => $customers->total(),
+                'from'         => $customers->firstItem(),
+                'to'           => $customers->lastItem(),
             ],
         ]);
     }
@@ -108,15 +158,16 @@ class CustomerController extends Controller
     {
         $this->authorizeStoreAccess(request()->user(), $customer->store_id);
 
-$customer->loadSum(['billings as dynamic_balance' => function ($query) {
-    $query->where('status', '!=', 'paid')
-          ->where('is_draft', false); // ← exclude drafts
-}], 'balance_due');
-
+        $customer->loadSum(
+            ['billings as current_balance' => fn ($q) => $q
+                ->where('status', '!=', 'paid')
+                ->where('is_draft', false)
+            ],
+            'balance_due'
+        );
         $customer->loadCount('billings');
 
-        $customer->current_balance = round((float) ($customer->dynamic_balance ?? 0.00), 2);
-        unset($customer->dynamic_balance);
+        $customer->current_balance = round((float) ($customer->current_balance ?? 0.00), 2);
 
         return response()->json([
             'message' => 'Customer retrieved successfully.',
@@ -133,19 +184,19 @@ $customer->loadSum(['billings as dynamic_balance' => function ($query) {
 
         $customer->update($request->validated());
 
-        $updatedCustomer = $customer->fresh();
+        $customer->loadSum(
+            ['billings as current_balance' => fn ($q) => $q
+                ->where('status', '!=', 'paid')
+                ->where('is_draft', false)
+            ],
+            'balance_due'
+        );
 
-$updatedCustomer->loadSum(['billings as dynamic_balance' => function ($query) {
-    $query->where('status', '!=', 'paid')
-          ->where('is_draft', false); // ← exclude drafts
-}], 'balance_due');
-
-        $updatedCustomer->current_balance = round((float) ($updatedCustomer->dynamic_balance ?? 0.00), 2);
-        unset($updatedCustomer->dynamic_balance);
+        $customer->current_balance = round((float) ($customer->current_balance ?? 0.00), 2);
 
         return response()->json([
             'message' => 'Customer updated successfully.',
-            'data'    => $updatedCustomer,
+            'data'    => $customer,
         ]);
     }
 

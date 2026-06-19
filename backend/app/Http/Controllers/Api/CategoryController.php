@@ -19,51 +19,50 @@ class CategoryController extends Controller
         private readonly CategoryService $service
     ) {}
 
-    public function index(Request $request): JsonResponse
-    {
-        $perPage = max(1, min((int) ($request->per_page ?? 3), 100));
-        $user    = $request->user();
+public function index(Request $request): JsonResponse
+{
+    $perPage = max(1, min((int) ($request->per_page ?? 6), 100));
+    $user    = $request->user();
 
-        // If a specific store is requested, verify access to it
-        if ($request->filled('store_id')) {
-            $this->service->authorizeStoreAccess($user, (int) $request->store_id);
-        }
-
-        $query = Category::query()
-            ->withCount('products');
-
-        // Non-admins are always scoped to their allowed stores
-        if (!$user->isAdmin()) {
-            $allowedIds = $this->service->allowedStoreIds($user);
-
-            // If they requested a store they don't belong to, allowedIds
-            // won't contain it, so the query returns nothing safely.
-            $query->whereIn('categories.store_id', $allowedIds);
-        }
-
-        $query
-            ->when($request->filled('store_id'), fn($q) =>
-                $q->where('categories.store_id', (int) $request->store_id)
-            )
-            ->when($request->filled('search'), fn($q) =>
-                $q->where('categories.category_name', 'like', '%' . trim($request->search) . '%')
-            )
-            ->orderBy('categories.category_name');
-
-        $categories = $query->paginate($perPage);
-
-        return response()->json([
-            'data' => $categories->items(),
-            'meta' => [
-                'current_page' => $categories->currentPage(),
-                'last_page'    => $categories->lastPage(),
-                'per_page'     => $categories->perPage(),
-                'total'        => $categories->total(),
-                'from'         => $categories->firstItem(),
-                'to'           => $categories->lastItem(),
-            ],
-        ]);
+    if ($request->filled('store_id')) {
+        $this->service->authorizeStoreAccess($user, (int) $request->store_id);
     }
+
+    $query = Category::query()
+        ->select([
+            'category_id',
+            'store_id',
+            'category_name',
+        ])
+        ->withCount('products');
+
+    if (!$user->isAdmin()) {
+        $query->whereIn('categories.store_id', $this->service->allowedStoreIds($user));
+    }
+
+    $query
+        ->when($request->filled('store_id'), fn($q) =>
+            $q->where('categories.store_id', (int) $request->store_id)
+        )
+        ->when($request->filled('search'), fn($q) =>
+            $q->where('categories.category_name', 'like', '%' . trim($request->search) . '%')
+        )
+        ->orderBy('categories.category_name');
+
+    $categories = $query->paginate($perPage);
+
+    return response()->json([
+        'data' => $categories->items(),
+        'meta' => [
+            'current_page' => $categories->currentPage(),
+            'last_page'    => $categories->lastPage(),
+            'per_page'     => $categories->perPage(),
+            'total'        => $categories->total(),
+            'from'         => $categories->firstItem(),
+            'to'           => $categories->lastItem(),
+        ],
+    ]);
+}
 
     public function store(StoreCategoryRequest $request): JsonResponse
     {
