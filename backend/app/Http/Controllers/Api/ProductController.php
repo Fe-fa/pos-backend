@@ -10,7 +10,6 @@ use App\Models\Product;
 use App\Services\ProductService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 
 class ProductController extends Controller
 {
@@ -20,9 +19,13 @@ class ProductController extends Controller
         private readonly ProductService $service
     ) {}
 
-public function index(Request $request): JsonResponse
+    /**
+     * Display a listing of the optimized products payload.
+     */
+ public function index(Request $request): JsonResponse
 {
-    $perPage = max(1, min((int) ($request->per_page ?? 15), 100));
+    // Restrict perPage boundaries safely
+    $perPage = max(1, min((int) ($request->get('per_page', 14)), 100));
     $user    = $request->user();
 
     $query = Product::query()
@@ -30,6 +33,7 @@ public function index(Request $request): JsonResponse
             'product_id',
             'product_name',
             'price',
+            'cost_price',
             'vat_rate',
             'sku',
             'category_id',
@@ -38,27 +42,34 @@ public function index(Request $request): JsonResponse
             'image_url',
         ])
         ->with([
+            // Select ONLY required columns to optimize database memory memory usage
             'category:category_id,category_name',
             'store:store_id,store_name',
         ])
         ->withCount('inventories')
         ->withSum('inventories as total_stock', 'quantity');
 
+    // 1. Enforce Multi-Tenancy Scope / Global Store Restrictions
     if (!$user->isAdmin()) {
         $query->whereIn('store_id', $this->service->allowedStoreIds($user));
     }
 
+    // 2. Apply Dynamic Request Filters
     $query
-        ->when($request->store_id, function ($q, $storeId) use ($user) {
-            $this->service->authorizeStoreAccess($user, $storeId);
-            $q->where('store_id', $storeId);
+        // Always enforce the selected Store ID from UI if passed
+        ->when($request->filled('store_id'), function ($q) use ($user, $request) {
+            $this->service->authorizeStoreAccess($user, $request->store_id);
+            $q->where('store_id', $request->store_id);
         })
-        ->when($request->search, function ($q, $search) {
+        // Global Search (Name & SKU)
+        ->when($request->filled('search'), function ($q) use ($request) {
+            $search = $request->search;
             $q->where(function ($sub) use ($search) {
                 $sub->where('product_name', 'like', "%{$search}%")
                     ->orWhere('sku', 'like', "%{$search}%");
             });
         })
+        // Array or Comma-separated Category filter
         ->when($request->filled('category_ids'), function ($q) use ($request) {
             $ids = collect(
                 is_array($request->category_ids)
@@ -74,16 +85,20 @@ public function index(Request $request): JsonResponse
                 $q->whereIn('category_id', $ids);
             }
         })
+        // Single Category ID backup filter
         ->when(
             !$request->filled('category_ids') && $request->filled('category_id'),
             fn($q) => $q->where('category_id', (int) $request->category_id)
         )
+        // Status filtering (Active/Inactive)
         ->when(
             $request->has('is_active') && $request->is_active !== '',
             fn($q) => $q->where('is_active', filter_var($request->is_active, FILTER_VALIDATE_BOOLEAN))
         )
+        // Order by newest created or high ID
         ->orderByDesc('product_id');
 
+    // Execute pagination
     $products = $query->paginate($perPage);
 
     return response()->json([
@@ -95,9 +110,14 @@ public function index(Request $request): JsonResponse
             'total'        => $products->total(),
             'from'         => $products->firstItem(),
             'to'           => $products->lastItem(),
+            'has_more'     => $products->hasMorePages(), // Helpful addition for frontend buttons
         ],
     ]);
 }
+
+    /**
+     * Store a newly created product in storage.
+     */
     public function store(StoreProductRequest $request): JsonResponse
     {
         if ($error = $this->authorizePermission('products.manage')) return $error;
@@ -108,6 +128,9 @@ public function index(Request $request): JsonResponse
         ], 201);
     }
 
+    /**
+     * Display the specified product.
+     */
     public function show(Request $request, Product $product): JsonResponse
     {
         return response()->json([
@@ -116,6 +139,9 @@ public function index(Request $request): JsonResponse
         ]);
     }
 
+    /**
+     * Update the specified product in storage.
+     */
     public function update(UpdateProductRequest $request, Product $product): JsonResponse
     {
         if ($error = $this->authorizePermission('products.manage')) return $error;
@@ -126,6 +152,9 @@ public function index(Request $request): JsonResponse
         ]);
     }
 
+    /**
+     * Remove the specified product from storage.
+     */
     public function destroy(Request $request, Product $product): JsonResponse
     {
         if ($error = $this->authorizePermission('products.manage')) return $error;

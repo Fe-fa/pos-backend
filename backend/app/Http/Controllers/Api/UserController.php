@@ -22,7 +22,7 @@ class UserController extends Controller
     {
         $actor            = $request->user();
         $requestedStoreId = $this->requestedStoreId($request);
-        $perPage          = max(1, min((int) ($request->per_page ?? 10), 100));
+        $perPage          = max(1, min((int) ($request->per_page ?? 6), 100));
 
         $query = User::query()
             ->select('users.*')

@@ -19,7 +19,7 @@ class BillingController extends Controller
 
 public function index(Request $request): JsonResponse
 {
-    $perPage = max(1, min((int) ($request->per_page ?? 10), 100));
+    $perPage = max(1, min((int) ($request->per_page ?? 11), 100));
     $user    = $request->user();
 
     $query = Billing::query()

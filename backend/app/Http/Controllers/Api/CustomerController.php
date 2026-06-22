@@ -76,7 +76,7 @@ class CustomerController extends Controller
     public function index(Request $request): JsonResponse
     {
         $user    = $request->user();
-        $perPage = max(1, min((int) $request->get('per_page', 10), 50));
+        $perPage = max(1, min((int) $request->get('per_page', 6), 50));
 
         $query = Customer::query()
             ->select([

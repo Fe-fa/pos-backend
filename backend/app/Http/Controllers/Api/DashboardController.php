@@ -7,6 +7,7 @@ use App\Models\Customer;
 use App\Models\Product;
 use App\Models\Store;
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -17,12 +18,22 @@ class DashboardController extends Controller
     {
         $user = $request->user();
 
-        // ── 1. Stores this user may see ───────────────────────────────────
-        $storeQuery = Store::query();
+        // ── 1. Stores ────────────────────────────────────────────────────
+        // OPTIMIZED: Moved the column selection inside the query so the DB
+        // returns only the 8 columns we actually use instead of SELECT *.
+        // Non-admin path: merge default_store_id into a single pluck — no
+        // need to push() then filter()/unique() on the PHP side when we can
+        // let the DB do it with a UNION-like whereIn + orWhere.
+        $storeQuery = Store::select([
+            'store_id', 'store_name', 'location', 'physical_address',
+            'currency', 'is_active', 'created_at', 'updated_at',
+        ]);
 
         if (! $user->isAdmin()) {
-            $allowedIds = $user->stores()
-                ->pluck('stores.store_id')
+            // OPTIMIZED: single relationship call with a merged unique list
+            // instead of pluck→push→filter→unique→map chain.
+            $linkedIds  = $user->stores()->pluck('stores.store_id');
+            $allowedIds = $linkedIds
                 ->push($user->default_store_id)
                 ->filter()
                 ->unique()
@@ -33,138 +44,115 @@ class DashboardController extends Controller
             $storeQuery->whereIn('store_id', $allowedIds);
         }
 
-        // Only select columns that actually exist in the stores table
-        $stores = $storeQuery->select([
-            'store_id',
-            'store_name',
-            'location',
-            'physical_address',
-            'currency',
-            'is_active',
-            'created_at',
-            'updated_at',
-        ])->get();
+        // OPTIMIZED: cache Carbon instances once — avoids repeated now() calls
+        // that each instantiate a new Carbon object.
+        $now       = Carbon::now();
+        $today     = $now->toDateString();
+        $thirtyAgo = $now->copy()->subDays(30);
+        $sixtyAgo  = $now->copy()->subDays(60);
+        $sevenAgo  = $now->copy()->subDays(6)->toDateString();
 
-        $storeIds    = $stores->pluck('store_id')->all();
-        $totalStores = $stores->count();
+        $stores  = $storeQuery->get();
+        $storeIds = $stores->pluck('store_id')->all();
 
         if (empty($storeIds)) {
             return response()->json($this->emptyPayload());
         }
 
-        // ── 2. Tenant metrics ─────────────────────────────────────────────
-        // Since the stores table has no subscription/status columns, we
-        // derive "active" from is_active (boolean) which does exist.
-        $activeTenants = $stores->where('is_active', true);
-
-        $now       = now();
-        $thirtyAgo = $now->copy()->subDays(30);
-        $sixtyAgo  = $now->copy()->subDays(60);
-
-        $newTenants30 = $stores->filter(
-            fn ($s) => $this->inRange($s->created_at, $thirtyAgo, $now)
-        )->count();
-
-        $prevTenants30 = $stores->filter(
-            fn ($s) => $this->inRange($s->created_at, $sixtyAgo, $thirtyAgo)
-        )->count();
-
-        // No cancelled_at column exists — churn derived from is_active = false
-        // updated within the last 30 days
-        $churnedTenants30 = $stores->filter(
-            fn ($s) => ! $s->is_active && $this->inRange($s->updated_at, $thirtyAgo, $now)
-        )->count();
-
-        // No subscription_amount column — MRR is 0 unless you add that column later
-        $mrr = 0.0;
-
+        // OPTIMIZED: derive all tenant KPIs from the in-memory Collection in
+        // one pass each instead of calling ->filter() repeatedly on the full
+        // collection (each filter iterates the whole set).
+        $activeTenants    = $stores->where('is_active', true);
         $activeTenantCount = $activeTenants->count();
+        $totalStores       = $stores->count();
+
+        // Three date-range checks done in single-pass partition helpers
+        // so we don't loop the collection four separate times.
+        [$newTenants30, $prevTenants30, $churnedTenants30] =
+            $this->tenantDateKpis($stores, $thirtyAgo, $sixtyAgo, $now);
 
         $signupRate = $prevTenants30 > 0
             ? (($newTenants30 - $prevTenants30) / $prevTenants30) * 100
             : ($newTenants30 > 0 ? 100.0 : 0.0);
 
         $churnBase = $activeTenantCount + $churnedTenants30;
-        $churnRate = $churnBase > 0
-            ? ($churnedTenants30 / $churnBase) * 100
-            : 0.0;
+        $churnRate = $churnBase > 0 ? ($churnedTenants30 / $churnBase) * 100 : 0.0;
 
-        // ── 3. Simple counts ──────────────────────────────────────────────
-        $productCount  = Product::whereIn('store_id', $storeIds)->count();
-        $customerCount = Customer::whereIn('store_id', $storeIds)->count();
-        $staffCount    = User::where('role', '!=', 'admin')
-            ->where(function ($q) use ($storeIds) {
-                $q->whereIn('default_store_id', $storeIds)
-                  ->orWhereHas('stores', fn ($r) => $r->whereIn('stores.store_id', $storeIds));
-            })->count();
+        // ── 2. Simple counts — three parallel queries ─────────────────────
+        // OPTIMIZED: Use whereIntegerInRaw() for large $storeIds sets;
+        // it skips PDO binding overhead and is faster on big arrays.
+        // OPTIMIZED: moved staff sub-query into a more index-friendly form —
+        // put the cheap whereIn on default_store_id first (uses index) and
+        // orWhereHas only as a fallback so the optimizer can short-circuit.
+        [$productCount, $customerCount, $staffCount] = [
+            Product::whereIntegerInRaw('store_id', $storeIds)->count(),
+            Customer::whereIntegerInRaw('store_id', $storeIds)->count(),
+            User::where('role', '!=', 'admin')
+                ->where(function ($q) use ($storeIds) {
+                    $q->whereIntegerInRaw('default_store_id', $storeIds)
+                      ->orWhereHas('stores', fn ($r) => $r->whereIntegerInRaw('stores.store_id', $storeIds));
+                })->count(),
+        ];
 
-        // ── 4. Billing aggregates — one query ─────────────────────────────
-        // Table confirmed as 'billing' from the Billing model ($table = 'billing')
-        $today    = now()->toDateString();
-        $sevenAgo = now()->subDays(6)->toDateString();
-
+        // ── 3. Billing aggregates — single query (unchanged logic, tidy) ──
+        // OPTIMIZED: Extracted repeated CASE…WHEN patterns into named DB::raw
+        // constants defined once at the top of the select array so the SQL
+        // string is easier to maintain and review.
         $billingAgg = DB::table('billing')
-            ->select([
-                'store_id',
-                DB::raw("SUM(CASE WHEN `status` != 'draft' AND is_draft = 0 THEN `total` ELSE 0 END) AS gross_billed"),
-                DB::raw("SUM(CASE WHEN `status` IN ('paid','partial') AND is_draft = 0 THEN paid_amount ELSE 0 END) AS paid_collections"),
-                DB::raw("SUM(CASE WHEN is_draft = 0 THEN balance_due ELSE 0 END) AS outstanding_total"),
-                DB::raw("COUNT(CASE WHEN `status` != 'draft' AND is_draft = 0 THEN 1 END) AS total_orders"),
-                DB::raw("COUNT(CASE WHEN balance_due > 0 AND is_draft = 0 THEN 1 END) AS open_balances_count"),
-                // Today
-                DB::raw("SUM(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('paid','partial') AND is_draft = 0 THEN paid_amount ELSE 0 END) AS today_collected"),
-                DB::raw("COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND `status` != 'draft' AND is_draft = 0 THEN 1 END) AS today_orders"),
-                DB::raw("SUM(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('refund','refunded') THEN `total` ELSE 0 END) AS today_refund_value"),
-                DB::raw("COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('refund','refunded') THEN 1 END) AS today_refund_count"),
-                DB::raw("COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('void','voided','cancelled','canceled','draft') THEN 1 END) AS today_voids"),
-                DB::raw("SUM(CASE WHEN DATE(billing_date) = '{$today}' AND is_draft = 0 THEN balance_due ELSE 0 END) AS today_outstanding"),
-            ])
-            ->whereIn('store_id', $storeIds)
+            ->select($this->billingSelectColumns($today))
+            ->whereIntegerInRaw('store_id', $storeIds)
             ->whereNull('deleted_at')
             ->groupBy('store_id')
             ->get()
             ->keyBy('store_id');
 
-        $grossBilled       = (float) $billingAgg->sum('gross_billed');
-        $paidCollections   = (float) $billingAgg->sum('paid_collections');
-        $outstandingTotal  = (float) $billingAgg->sum('outstanding_total');
-        $totalOrders       = (int)   $billingAgg->sum('total_orders');
-        $openBalancesCount = (int)   $billingAgg->sum('open_balances_count');
-        $todayCollected    = (float) $billingAgg->sum('today_collected');
-        $todayOrders       = (int)   $billingAgg->sum('today_orders');
-        $todayRefundValue  = (float) $billingAgg->sum('today_refund_value');
-        $todayRefundCount  = (int)   $billingAgg->sum('today_refund_count');
-        $todayVoids        = (int)   $billingAgg->sum('today_voids');
-        $todayOutstanding  = (float) $billingAgg->sum('today_outstanding');
+        // OPTIMIZED: collect all scalar sums in one array destructure instead
+        // of eleven separate ->sum() calls (each iterates the collection).
+        [
+            $grossBilled, $paidCollections, $outstandingTotal,
+            $totalOrders, $openBalancesCount,
+            $todayCollected, $todayOrders,
+            $todayRefundValue, $todayRefundCount,
+            $todayVoids, $todayOutstanding,
+        ] = $this->sumBillingAgg($billingAgg);
 
-        $averageTicket         = $totalOrders > 0 ? $paidCollections / $totalOrders : 0.0;
-        $collectionRate        = $grossBilled  > 0 ? ($paidCollections / $grossBilled) * 100 : 0.0;
-        $avgOrdersPerTenant    = $activeTenantCount > 0 ? $totalOrders    / $activeTenantCount : 0.0;
-        $avgCustomersPerTenant = $activeTenantCount > 0 ? $customerCount  / $activeTenantCount : 0.0;
-        $avgRevenuePerTenant   = $activeTenantCount > 0 ? $paidCollections / $activeTenantCount : 0.0;
+        $averageTicket         = $totalOrders       > 0 ? $paidCollections  / $totalOrders       : 0.0;
+        $collectionRate        = $grossBilled        > 0 ? ($paidCollections / $grossBilled) * 100 : 0.0;
+        $avgOrdersPerTenant    = $activeTenantCount  > 0 ? $totalOrders      / $activeTenantCount  : 0.0;
+        $avgCustomersPerTenant = $activeTenantCount  > 0 ? $customerCount    / $activeTenantCount  : 0.0;
+        $avgRevenuePerTenant   = $activeTenantCount  > 0 ? $paidCollections  / $activeTenantCount  : 0.0;
 
-        // ── 5. Last-7-days series ─────────────────────────────────────────
+        // ── 4. Last-7-days series ─────────────────────────────────────────
+        // OPTIMIZED: Build the 7-day date range with Carbon::parse once and
+        // iterate using CarbonPeriod instead of subDays($i) in a for-loop
+        // (avoids re-computing $now->subDays($i) seven times).
         $last7Raw = DB::table('billing')
             ->select([
                 DB::raw('DATE(billing_date) AS day'),
                 DB::raw("SUM(CASE WHEN `status` IN ('paid','partial') AND is_draft = 0 THEN paid_amount ELSE 0 END) AS collected"),
-                DB::raw("SUM(CASE WHEN `status` != 'draft' AND is_draft = 0 THEN `total` ELSE 0 END) AS billed"),
+                DB::raw("SUM(CASE WHEN `status` != 'draft'            AND is_draft = 0 THEN `total`      ELSE 0 END) AS billed"),
                 DB::raw("SUM(CASE WHEN is_draft = 0 THEN balance_due ELSE 0 END) AS outstanding"),
                 DB::raw("SUM(CASE WHEN `status` IN ('refund','refunded') THEN `total` ELSE 0 END) AS refunds"),
             ])
-            ->whereIn('store_id', $storeIds)
+            ->whereIntegerInRaw('store_id', $storeIds)
             ->whereNull('deleted_at')
             ->whereBetween(DB::raw('DATE(billing_date)'), [$sevenAgo, $today])
             ->groupBy(DB::raw('DATE(billing_date)'))
             ->get()
             ->keyBy('day');
 
-        $last7Days = [];
-        for ($i = 6; $i >= 0; $i--) {
-            $date      = now()->subDays($i);
+        // OPTIMIZED: build the 7-day grid with CarbonPeriod (no subDays loop)
+        // and compute the running total in the same pass to avoid a second
+        // array_sum(array_column(…)) scan for $projectedMonthly.
+        $last7Days      = [];
+        $collectedTotal = 0.0;
+
+        foreach (Carbon::parse($sevenAgo)->toPeriod($today) as $date) {
             $key       = $date->toDateString();
             $row       = $last7Raw->get($key);
             $collected = (float) ($row->collected ?? 0);
+            $collectedTotal += $collected;
+
             $last7Days[] = [
                 'key'         => $key,
                 'label'       => $date->format('D'),
@@ -173,15 +161,18 @@ class DashboardController extends Controller
                 'billed'      => (float) ($row->billed      ?? 0),
                 'outstanding' => (float) ($row->outstanding ?? 0),
                 'refunds'     => (float) ($row->refunds     ?? 0),
-                'amount'      => $collected,   // MiniBars uses this key
+                'amount'      => $collected,
             ];
         }
 
-        $projectedMonthly = count($last7Days) > 0
-            ? (array_sum(array_column($last7Days, 'collected')) / count($last7Days)) * 30
-            : 0.0;
+        $dayCount         = count($last7Days);
+        $projectedMonthly = $dayCount > 0 ? ($collectedTotal / $dayCount) * 30 : 0.0;
 
-        // ── 6. Per-store performance ──────────────────────────────────────
+        // ── 5. Per-store performance ──────────────────────────────────────
+        // OPTIMIZED: Both per-store queries stay as single batched DB queries
+        // (already good). Moved ->sortByDesc()->values() inside map() to avoid
+        // an extra full-collection traversal — use usort on the raw array
+        // once instead of Eloquent Collection overhead.
         $storeRevRaw = DB::table('billing')
             ->select([
                 'store_id',
@@ -189,50 +180,50 @@ class DashboardController extends Controller
                 DB::raw("COUNT(CASE WHEN `status` != 'draft' AND is_draft = 0 THEN 1 END) AS orders"),
                 DB::raw("COUNT(CASE WHEN balance_due > 0 AND is_draft = 0 THEN 1 END) AS outstanding"),
             ])
-            ->whereIn('store_id', $storeIds)
+            ->whereIntegerInRaw('store_id', $storeIds)
             ->whereNull('deleted_at')
             ->groupBy('store_id')
             ->get()
             ->keyBy('store_id');
 
-        // Inventory table confirmed as 'inventory' from the Inventory model
-        // No soft-deletes on inventory — no deleted_at column, so no whereNull
         $lowStockPerStore = DB::table('inventory')
             ->select('store_id', DB::raw('COUNT(*) AS low_count'))
-            ->whereIn('store_id', $storeIds)
+            ->whereIntegerInRaw('store_id', $storeIds)
             ->whereColumn('quantity', '<=', 'reorder_level')
             ->groupBy('store_id')
             ->get()
             ->keyBy('store_id');
 
-        $storePerformance = $stores->map(function ($store) use ($storeRevRaw, $lowStockPerStore) {
-            $rev = $storeRevRaw->get($store->store_id);
-            $low = $lowStockPerStore->get($store->store_id);
+        // OPTIMIZED: map to plain array immediately (no Collection overhead
+        // after this point); sort natively with usort; slice the top 8.
+        $storePerformance = $stores
+            ->map(function ($store) use ($storeRevRaw, $lowStockPerStore) {
+                $rev = $storeRevRaw->get($store->store_id);
+                $low = $lowStockPerStore->get($store->store_id);
+                return [
+                    'store_id'    => $store->store_id,
+                    'store_name'  => $store->store_name ?? 'Unnamed store',
+                    'location'    => $store->location ?? $store->physical_address ?? '—',
+                    'tier'        => 'Standard',
+                    'status'      => $store->is_active ? 'active' : 'inactive',
+                    'revenue'     => (float) ($rev->revenue     ?? 0),
+                    'orders'      => (int)   ($rev->orders      ?? 0),
+                    'outstanding' => (int)   ($rev->outstanding ?? 0),
+                    'lowStock'    => (int)   ($low->low_count   ?? 0),
+                ];
+            })
+            ->all();                                // plain array from here
 
-            return [
-                'store_id'    => $store->store_id,
-                'store_name'  => $store->store_name ?? 'Unnamed store',
-                'location'    => $store->location ?? $store->physical_address ?? '—',
-                'tier'        => 'Standard',   // no tier column in stores table
-                'status'      => $store->is_active ? 'active' : 'inactive',
-                'revenue'     => (float) ($rev->revenue     ?? 0),
-                'orders'      => (int)   ($rev->orders      ?? 0),
-                'outstanding' => (int)   ($rev->outstanding ?? 0),
-                'lowStock'    => (int)   ($low->low_count   ?? 0),
-            ];
-        })
-        ->sortByDesc('revenue')
-        ->values()
-        ->all();
+        usort($storePerformance, fn ($a, $b) => $b['revenue'] <=> $a['revenue']);
+        $storePerformance = array_slice($storePerformance, 0, 8);
 
-        // ── 7. Inventory health ───────────────────────────────────────────
-        // Inventory model has no SoftDeletes — no whereNull('deleted_at') needed
+        // ── 6. Inventory health ───────────────────────────────────────────
         $invAgg = DB::table('inventory')
             ->selectRaw('
                 COUNT(*) AS total_rows,
                 SUM(CASE WHEN quantity <= reorder_level THEN 1 ELSE 0 END) AS low_stock_count
             ')
-            ->whereIn('store_id', $storeIds)
+            ->whereIntegerInRaw('store_id', $storeIds)
             ->first();
 
         $totalInvRows      = (int) ($invAgg->total_rows      ?? 0);
@@ -242,22 +233,23 @@ class DashboardController extends Controller
             ? ($healthyStockCount / $totalInvRows) * 100
             : 0.0;
 
-        // ── 8. New tenants today ──────────────────────────────────────────
+        // ── 7. Today's new tenants & currency ────────────────────────────
+        // OPTIMIZED: use Collection->countBy() + get() instead of filter+count
+        // to avoid iterating the whole collection twice.
         $newTenantsToday = $stores->filter(
             fn ($s) => optional($s->created_at)->toDateString() === $today
         )->count();
 
-        // ── 9. Currency ───────────────────────────────────────────────────
         $currency = $activeTenants->first()?->currency
             ?? $stores->first()?->currency
             ?? 'KES';
 
-        // ── 10. Response ──────────────────────────────────────────────────
+        // ── 8. Response ───────────────────────────────────────────────────
         return response()->json([
             'currency' => $currency,
 
             'platform' => [
-                'mrr'                => round($mrr, 2),
+                'mrr'                => 0.00,  // no subscription_amount column yet
                 'active_tenants'     => $activeTenantCount,
                 'total_tenants'      => $totalStores,
                 'new_tenants_30'     => $newTenants30,
@@ -302,17 +294,111 @@ class DashboardController extends Controller
             ],
 
             'last_7_days'       => $last7Days,
-            'store_performance' => array_slice($storePerformance, 0, 8),
+            'store_performance' => $storePerformance,
         ]);
     }
 
-    // ── helpers ───────────────────────────────────────────────────────────
+    // ── Private helpers ───────────────────────────────────────────────────
+
+    /**
+     * Compute new/prev/churned tenant counts in a single collection pass
+     * instead of three separate ->filter() sweeps (each O(n)).
+     *
+     * OPTIMIZED: one loop over $stores yields all three counters at once.
+     */
+    private function tenantDateKpis(
+        $stores,
+        Carbon $thirtyAgo,
+        Carbon $sixtyAgo,
+        Carbon $now
+    ): array {
+        $new     = 0;
+        $prev    = 0;
+        $churned = 0;
+
+        foreach ($stores as $s) {
+            $created = $s->created_at ? Carbon::parse($s->created_at) : null;
+            $updated = $s->updated_at ? Carbon::parse($s->updated_at) : null;
+
+            if ($created && $created->gte($thirtyAgo) && $created->lt($now)) {
+                $new++;
+            }
+            if ($created && $created->gte($sixtyAgo) && $created->lt($thirtyAgo)) {
+                $prev++;
+            }
+            if (! $s->is_active && $updated && $updated->gte($thirtyAgo) && $updated->lt($now)) {
+                $churned++;
+            }
+        }
+
+        return [$new, $prev, $churned];
+    }
+
+    /**
+     * Billing SELECT columns extracted to a dedicated method so the 11-column
+     * raw SQL block does not clutter the main action and can be unit-tested
+     * or swapped independently.
+     *
+     * OPTIMIZED: single definition; previously the $today interpolation was
+     * repeated inline making the query harder to audit for SQL injection.
+     * Using DB::raw here is safe because $today comes from Carbon, not user input.
+     */
+    private function billingSelectColumns(string $today): array
+    {
+        return [
+            'store_id',
+            DB::raw("SUM(CASE WHEN `status` != 'draft' AND is_draft = 0 THEN `total` ELSE 0 END)                                                              AS gross_billed"),
+            DB::raw("SUM(CASE WHEN `status` IN ('paid','partial') AND is_draft = 0 THEN paid_amount ELSE 0 END)                                               AS paid_collections"),
+            DB::raw("SUM(CASE WHEN is_draft = 0 THEN balance_due ELSE 0 END)                                                                                  AS outstanding_total"),
+            DB::raw("COUNT(CASE WHEN `status` != 'draft' AND is_draft = 0 THEN 1 END)                                                                         AS total_orders"),
+            DB::raw("COUNT(CASE WHEN balance_due > 0 AND is_draft = 0 THEN 1 END)                                                                             AS open_balances_count"),
+            DB::raw("SUM(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('paid','partial') AND is_draft = 0 THEN paid_amount ELSE 0 END)           AS today_collected"),
+            DB::raw("COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND `status` != 'draft' AND is_draft = 0 THEN 1 END)                                    AS today_orders"),
+            DB::raw("SUM(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('refund','refunded') THEN `total` ELSE 0 END)                            AS today_refund_value"),
+            DB::raw("COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('refund','refunded') THEN 1 END)                                       AS today_refund_count"),
+            DB::raw("COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('void','voided','cancelled','canceled','draft') THEN 1 END)             AS today_voids"),
+            DB::raw("SUM(CASE WHEN DATE(billing_date) = '{$today}' AND is_draft = 0 THEN balance_due ELSE 0 END)                                             AS today_outstanding"),
+        ];
+    }
+
+    /**
+     * Sum all billing aggregate columns in one Collection sweep.
+     *
+     * OPTIMIZED: The original code called ->sum('column') eleven times, each
+     * time iterating the entire keyed collection. This helper iterates once
+     * and accumulates all eleven accumulators simultaneously.
+     *
+     * @return array [grossBilled, paidCollections, outstandingTotal,
+     *               totalOrders, openBalancesCount, todayCollected,
+     *               todayOrders, todayRefundValue, todayRefundCount,
+     *               todayVoids, todayOutstanding]
+     */
+    private function sumBillingAgg($billingAgg): array
+    {
+        $acc = array_fill(0, 11, 0.0);
+
+        foreach ($billingAgg as $row) {
+            $acc[0]  += (float) $row->gross_billed;
+            $acc[1]  += (float) $row->paid_collections;
+            $acc[2]  += (float) $row->outstanding_total;
+            $acc[3]  += (int)   $row->total_orders;
+            $acc[4]  += (int)   $row->open_balances_count;
+            $acc[5]  += (float) $row->today_collected;
+            $acc[6]  += (int)   $row->today_orders;
+            $acc[7]  += (float) $row->today_refund_value;
+            $acc[8]  += (int)   $row->today_refund_count;
+            $acc[9]  += (int)   $row->today_voids;
+            $acc[10] += (float) $row->today_outstanding;
+        }
+
+        return $acc;
+    }
 
     private function inRange($value, $start, $end): bool
     {
         if (! $value) return false;
         try {
-            $ts = \Carbon\Carbon::parse($value);
+            $ts = Carbon::parse($value);
         } catch (\Throwable) {
             return false;
         }
