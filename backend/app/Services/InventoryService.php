@@ -164,23 +164,42 @@ class InventoryService
                 ], 422));
             }
 
-            $layers = Inventory::query()
-                ->where('store_id', $storeId)
-                ->where('product_id', $productId)
-                ->available()
-                ->fifo()
-                ->lockForUpdate()
-                ->get();
+$layers = Inventory::query()
+    ->where('store_id', $storeId)
+    ->where('product_id', $productId)
+    ->available()
+    ->fifo()
+    ->lockForUpdate()
+    ->with('product:product_id,product_name,sku')  // ← add this
+    ->get();
 
-            $availableQty = (int) $layers->sum('quantity');
+$availableQty = (int) $layers->sum('quantity');
+$reorderLevel = (int) $layers->max('reorder_level');
+$sellableQty  = max($availableQty - $reorderLevel, 0);
 
-            if ($availableQty < $quantity) {
-                abort(response()->json([
-                    'message' => 'Insufficient stock for FIFO consumption.',
-                    'available_quantity' => $availableQty,
-                    'requested_quantity' => $quantity,
-                ], 422));
-            }
+// Grab product name from the first layer (all layers share the same product)
+$productName = $layers->first()?->product?->product_name ?? "Product #{$productId}";
+$productSku  = $layers->first()?->product?->sku ?? '';
+
+if ($availableQty < $quantity) {
+    abort(response()->json([
+        'message'            =>'Insufficient stock for \"{$productName}\".',
+        'available_quantity' => $availableQty,
+        'requested_quantity' => $quantity,
+    ], 422));
+}
+
+if ($sellableQty < $quantity) {
+    abort(response()->json([
+        'message'            => "\"{$productName}\". Please restock before selling.",
+        'available_quantity' => $availableQty,
+        'reorder_level'      => $reorderLevel,
+        'sellable_quantity'  => $sellableQty,
+        'requested_quantity' => $quantity,
+        'product_name'       => $productName,
+        'sku'                => $productSku,
+    ], 422));
+}
 
             $remaining = $quantity;
             $consumedLayers = [];

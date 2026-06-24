@@ -17,6 +17,8 @@ use App\Http\Controllers\Api\PosDashboardController;
 use App\Http\Controllers\Api\RewardRuleController;
 use App\Http\Controllers\Api\SuperAdminDashboardController;
 use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\ManagerDashboardController;
+
 
 Route::prefix('auth')->group(function () {
     Route::post('/register', [AuthController::class, 'register'])->name('auth.register');
@@ -82,8 +84,21 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/customer-loyalty', [RewardRuleController::class, 'customerLoyalty']);
         Route::post('/claim-chapa5', [RewardRuleController::class, 'claimChapa5']);
     }); 
-       Route::get('/dashboard/super-admin', [DashboardController::class, 'superAdmin'])
-        ->name('dashboard.super-admin');
+Route::prefix('dashboard/super-admin')->group(function () {
+    Route::get('/',              [DashboardController::class, 'superAdmin'])->name('dashboard.super-admin');
+    Route::get('/trends',        [DashboardController::class, 'trends'])->name('dashboard.super-admin.trends');
+    Route::get('/operations',    [DashboardController::class, 'operations'])->name('dashboard.super-admin.operations');
+    Route::get('/subscriptions', [DashboardController::class, 'subscriptions'])->name('dashboard.super-admin.subscriptions');
+    Route::get('/security',      [DashboardController::class, 'security'])->name('dashboard.super-admin.security');
+});
+Route::prefix('dashboard/manager')->group(function () {
+    Route::get('/',         [ManagerDashboardController::class, 'summary'])->name('dashboard.manager.summary');
+    Route::get('/trends',   [ManagerDashboardController::class, 'trends'])->name('dashboard.manager.trends');
+    Route::get('/activity', [ManagerDashboardController::class, 'activity'])->name('dashboard.manager.activity');
+});
+
+        Route::get('payments', [PaymentController::class, 'index'])->name('payments.index');
+      Route::get('payments/{payment:payment_id}', [PaymentController::class, 'show']);
 });
 
 Route::get('public/documents/{mode}/{uuid}', [PublicDocumentController::class, 'show'])

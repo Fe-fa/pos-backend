@@ -17,87 +17,83 @@ class BillingController extends Controller
 
     public function __construct(private readonly BillingService $service) {}
 
-public function index(Request $request): JsonResponse
-{
-    $perPage = max(1, min((int) ($request->per_page ?? 11), 100));
-    $user    = $request->user();
+    public function index(Request $request): JsonResponse
+    {
+        $perPage = max(1, min((int) ($request->per_page ?? 15), 100));
+        $user    = $request->user();
 
-    $query = Billing::query()
-        ->select([
-            'billing_id',
-            'uuid',
+        // Authorize store access if a specific store is requested
+        if ($request->filled('store_id')) {
+            $this->service->authorizeStoreAccess($user, $request->store_id);
+        }
+
+        $query = Billing::query()
+            ->select([
+                'billing_id',
+                'uuid',
+                'store_id',
+                'customer_id',
+                'user_id',
+                'invnumber',
+                'status',
+                'subtotal',
+                'vat_amount',
+                'total',
+                'paid_amount',
+                'balance_due',
+                'is_draft',
+                'billing_date',
+                'fulfillment_status',
+                'fulfillment_type',
+                'points_discount',
+                'stock_applied_at',
+                'created_at',
+                'deleted_at',
+            ])
+            ->with([
+                'customer:customer_id,full_name,email,phone',
+                'store:store_id,store_name',
+                'user:user_id,first_name,last_name,email',
+                'payments:payment_id,billing_id,amount_received,payment_method,payment_date',
+            ])
+            ->withCount('items')
+            ->withSum('items', 'quantity');
+
+        // Apply soft-delete scope before scopeAccessible
+        if ($request->boolean('only_trashed')) {
+            $query->onlyTrashed();
+        } elseif ($request->boolean('with_trashed')) {
+            $query->withTrashed();
+        }
+
+        // Apply role-based access scoping
+        $query = $this->service->scopeAccessible($query, $user);
+
+        // Apply all request filters via service — includes customer_id,
+        // comma-separated status, is_draft, fulfillment_*, store_id
+        $query = $this->service->applyListFilters($query, $request->only([
             'store_id',
             'customer_id',
-            'user_id',
-            'invnumber',
             'status',
-            'subtotal',
-            'vat_amount',
-            'total',
-            'paid_amount',
-            'balance_due',
             'is_draft',
-            'billing_date',
             'fulfillment_status',
             'fulfillment_type',
-            'points_discount',
-            'stock_applied_at',
-            'created_at',
-            'deleted_at',
-        ])
-        ->with([
-            'customer:customer_id,full_name,email,phone',
-            'store:store_id,store_name',
-            'user:user_id,first_name,last_name,email',
-            'payments:payment_id,billing_id,amount_received,payment_method,payment_date',
-        ])
-        ->withCount('items')
-        ->withSum('items', 'quantity');
+        ]));
 
-    if ($request->has('with_trashed') && filter_var($request->with_trashed, FILTER_VALIDATE_BOOLEAN)) {
-        $query->withTrashed();
+        $billings = $query->orderByDesc('billing_id')->paginate($perPage);
+
+        return response()->json([
+            'data' => $billings->items(),
+            'meta' => [
+                'current_page' => $billings->currentPage(),
+                'last_page'    => $billings->lastPage(),
+                'per_page'     => $billings->perPage(),
+                'total'        => $billings->total(),
+                'from'         => $billings->firstItem(),
+                'to'           => $billings->lastItem(),
+            ],
+        ]);
     }
-
-    if ($request->has('only_trashed') && filter_var($request->only_trashed, FILTER_VALIDATE_BOOLEAN)) {
-        $query->onlyTrashed();
-    }
-
-    $query = $this->service->scopeAccessible($query, $user);
-
-    $query
-        ->when($request->store_id, function ($q, $storeId) use ($user) {
-            $this->service->authorizeStoreAccess($user, $storeId);
-            $q->where('store_id', $storeId);
-        })
-        ->when($request->status, fn($q, $status) =>
-            $q->where('status', $status)
-        )
-        ->when(
-            $request->has('is_draft') && $request->is_draft !== '',
-            fn($q) => $q->where('is_draft', filter_var($request->is_draft, FILTER_VALIDATE_BOOLEAN))
-        )
-        ->when($request->fulfillment_status, fn($q, $v) =>
-            $q->where('fulfillment_status', $v)
-        )
-        ->when($request->fulfillment_type, fn($q, $v) =>
-            $q->where('fulfillment_type', $v)
-        )
-        ->orderByDesc('billing_id');
-
-    $billings = $query->paginate($perPage);
-
-    return response()->json([
-        'data' => $billings->items(),
-        'meta' => [
-            'current_page' => $billings->currentPage(),
-            'last_page'    => $billings->lastPage(),
-            'per_page'     => $billings->perPage(),
-            'total'        => $billings->total(),
-            'from'         => $billings->firstItem(),
-            'to'           => $billings->lastItem(),
-        ],
-    ]);
-}
 
     public function store(StoreBillingRequest $request): JsonResponse
     {
@@ -111,8 +107,6 @@ public function index(Request $request): JsonResponse
 
     public function show($id): JsonResponse
     {
-    
-        
         $billing = Billing::withTrashed()->find($id);
 
         if (!$billing) {

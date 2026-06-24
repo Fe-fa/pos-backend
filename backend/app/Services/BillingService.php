@@ -45,6 +45,50 @@ class BillingService
             ->where('user_id', $user->user_id);
     }
 
+    public function applyListFilters(Builder $query, array $filters): Builder
+    {
+        // Store filter
+        if (!empty($filters['store_id'])) {
+            $query->where('store_id', (int) $filters['store_id']);
+        }
+
+        // Customer filter — used by balance-settlement flow
+        if (!empty($filters['customer_id'])) {
+            $query->where('customer_id', (int) $filters['customer_id']);
+        }
+
+        // Status — supports single value or comma-separated: "unpaid,partial"
+        if (!empty($filters['status'])) {
+            $statuses = array_filter(array_map('trim', explode(',', $filters['status'])));
+            count($statuses) === 1
+                ? $query->where('status', $statuses[0])
+                : $query->whereIn('status', $statuses);
+        }
+
+        // Draft flag
+        if (isset($filters['is_draft']) && $filters['is_draft'] !== '') {
+            $query->where('is_draft', filter_var($filters['is_draft'], FILTER_VALIDATE_BOOLEAN));
+        }
+
+        // Fulfillment filters
+        if (!empty($filters['fulfillment_status'])) {
+            $query->where('fulfillment_status', $filters['fulfillment_status']);
+        }
+
+        if (!empty($filters['fulfillment_type'])) {
+            $query->where('fulfillment_type', $filters['fulfillment_type']);
+        }
+
+        // Soft-delete scope
+        if (!empty($filters['only_trashed'])) {
+            $query->onlyTrashed();
+        } elseif (!empty($filters['with_trashed'])) {
+            $query->withTrashed();
+        }
+
+        return $query;
+    }
+
     public function authorizeStoreAccess(User $user, int|string|null $storeId): void
     {
         if (!$storeId || $user->isAdmin()) {
@@ -192,13 +236,11 @@ class BillingService
     {
         $billing->load('items');
 
-        $subtotal   = (float) $billing->items->sum('line_subtotal');
-        $vatAmount  = (float) $billing->items->sum('vat_amount');
-        $grossTotal      = $subtotal + $vatAmount;
-        
+        $subtotal       = (float) $billing->items->sum('line_subtotal');
+        $vatAmount      = (float) $billing->items->sum('vat_amount');
+        $grossTotal     = $subtotal + $vatAmount;
         $pointsDiscount = (float) ($billing->points_discount ?? 0);
-    $total      = max($grossTotal - $pointsDiscount, 0);
-
+        $total          = max($grossTotal - $pointsDiscount, 0);
 
         $paidAmount = (float) $billing->payments()->sum('amount_received');
         $balanceDue = max($total - $paidAmount, 0);

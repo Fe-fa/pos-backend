@@ -30,6 +30,7 @@ public function index(Request $request): JsonResponse
             'product_id',
             'batch_no',
             'quantity',
+            'reorder_level',
             'created_at',
         ])
         ->with([
