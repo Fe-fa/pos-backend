@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AuthorizesPermission;
 use App\Models\Store;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
@@ -13,20 +14,13 @@ use Illuminate\Support\Facades\Schema;
 
 class ManagerDashboardController extends Controller
 {
-    /**
-     * Cache Schema::hasColumn lookups per request.
-     */
+    use AuthorizesPermission;
+
     private array $columnExistsCache = [];
 
-    /**
-     * Resolve only stores the current user is allowed to view.
-     * - Admin: can view all stores or one requested store
-     * - Non-admin: only linked/default stores
-     * - If store_id is passed but not allowed => 403
-     */
     private function resolveStoreIds(Request $request): array
     {
-        $user = $request->user();
+        $user             = $request->user();
         $requestedStoreId = $request->integer('store_id') ?: null;
 
         if ($user->isAdmin()) {
@@ -70,14 +64,10 @@ class ManagerDashboardController extends Controller
         return $allowedIds;
     }
 
-    /**
-     * ─────────────────────────────────────────────────────────────────────
-     * SUMMARY
-     * Main KPI block for manager dashboard
-     * ─────────────────────────────────────────────────────────────────────
-     */
     public function summary(Request $request): JsonResponse
     {
+        if ($error = $this->authorizePermission('page.dashboard')) return $error;
+
         $storeIds = $this->resolveStoreIds($request);
 
         if (empty($storeIds)) {
@@ -193,23 +183,22 @@ class ManagerDashboardController extends Controller
             ->whereIntegerInRaw('i.store_id', $storeIds)
             ->first();
 
-$activeStaffCount = DB::table('users')
-    ->where('role', '!=', 'admin')
-    ->where('is_active', true)
-    ->where(function ($q) use ($storeIds) {
-        $q->whereIntegerInRaw('default_store_id', $storeIds);
+        $activeStaffCount = DB::table('users')
+            ->where('role', '!=', 'admin')
+            ->where('is_active', true)
+            ->where(function ($q) use ($storeIds) {
+                $q->whereIntegerInRaw('default_store_id', $storeIds);
 
-        // Only join store_user pivot if the table actually exists
-        if (Schema::hasTable('store_user')) {
-            $q->orWhereExists(function ($sub) use ($storeIds) {
-                $sub->selectRaw('1')
-                    ->from('store_user')
-                    ->whereColumn('store_user.user_id', 'users.user_id')
-                    ->whereIntegerInRaw('store_user.store_id', $storeIds);
-            });
-        }
-    })
-    ->count();
+                if (Schema::hasTable('store_user')) {
+                    $q->orWhereExists(function ($sub) use ($storeIds) {
+                        $sub->selectRaw('1')
+                            ->from('store_user')
+                            ->whereColumn('store_user.user_id', 'users.user_id')
+                            ->whereIntegerInRaw('store_user.store_id', $storeIds);
+                    });
+                }
+            })
+            ->count();
 
         $newCustomersTodayQuery = DB::table('customers')
             ->whereDate('created_at', $today);
@@ -250,10 +239,7 @@ $activeStaffCount = DB::table('users')
             ->values();
 
         $billingUserColumn = $this->firstExistingColumn('billing', [
-            'user_id',
-            'cashier_id',
-            'processed_by',
-            'created_by',
+            'user_id', 'cashier_id', 'processed_by', 'created_by',
         ]);
 
         $userNameExpr = $billingUserColumn
@@ -365,17 +351,17 @@ $activeStaffCount = DB::table('users')
                     'unique_customers'  => (int) ($billingAgg->unique_customers_today ?? 0),
                 ],
                 'stats' => [
-                    'inventory_health_pct'   => round($inventoryHealth, 2),
-                    'monthly_projected_sales'=> round($monthlyProjectedSales, 2),
-                    'average_margin'         => round($averageMargin, 2),
-                    'active_registers'       => $registerPerformance->count(),
-                    'active_staff'           => $activeStaffCount,
-                    'total_inventory_units'  => (float) ($inventoryAgg->total_inventory_units ?? 0),
-                    'total_inventory_value'  => round((float) ($inventoryAgg->total_inventory_value ?? 0), 2),
-                    'low_stock_count'        => $lowStockCount,
-                    'out_of_stock_count'     => $outOfStockCount,
-                    'healthy_stock_count'    => $healthyStockCount,
-                    'total_inventory_rows'   => $totalRows,
+                    'inventory_health_pct'    => round($inventoryHealth, 2),
+                    'monthly_projected_sales' => round($monthlyProjectedSales, 2),
+                    'average_margin'          => round($averageMargin, 2),
+                    'active_registers'        => $registerPerformance->count(),
+                    'active_staff'            => $activeStaffCount,
+                    'total_inventory_units'   => (float) ($inventoryAgg->total_inventory_units ?? 0),
+                    'total_inventory_value'   => round((float) ($inventoryAgg->total_inventory_value ?? 0), 2),
+                    'low_stock_count'         => $lowStockCount,
+                    'out_of_stock_count'      => $outOfStockCount,
+                    'healthy_stock_count'     => $healthyStockCount,
+                    'total_inventory_rows'    => $totalRows,
                 ],
                 'loyalty' => [
                     'new_customers_today' => $newCustomersToday,
@@ -389,14 +375,10 @@ $activeStaffCount = DB::table('users')
         ]);
     }
 
-    /**
-     * ─────────────────────────────────────────────────────────────────────
-     * TRENDS
-     * Last 7 days sales/refunds/cost/profit/net
-     * ─────────────────────────────────────────────────────────────────────
-     */
     public function trends(Request $request): JsonResponse
     {
+        if ($error = $this->authorizePermission('page.dashboard')) return $error;
+
         $storeIds = $this->resolveStoreIds($request);
 
         if (empty($storeIds)) {
@@ -465,14 +447,10 @@ $activeStaffCount = DB::table('users')
         ]);
     }
 
-    /**
-     * ─────────────────────────────────────────────────────────────────────
-     * ACTIVITY
-     * Recent billings, pending orders, low stock alerts
-     * ─────────────────────────────────────────────────────────────────────
-     */
     public function activity(Request $request): JsonResponse
     {
+        if ($error = $this->authorizePermission('page.dashboard')) return $error;
+
         $storeIds = $this->resolveStoreIds($request);
 
         if (empty($storeIds)) {
@@ -582,11 +560,8 @@ $activeStaffCount = DB::table('users')
         ]);
     }
 
-    /**
-     * ─────────────────────────────────────────────────────────────────────
-     * Empty payloads
-     * ─────────────────────────────────────────────────────────────────────
-     */
+    // ── Empty payload ─────────────────────────────────────────────────────
+
     private function emptySummaryPayload(): array
     {
         return [
@@ -636,11 +611,8 @@ $activeStaffCount = DB::table('users')
         ];
     }
 
-    /**
-     * ─────────────────────────────────────────────────────────────────────
-     * Dynamic schema helpers
-     * ─────────────────────────────────────────────────────────────────────
-     */
+    // ── Schema helpers ────────────────────────────────────────────────────
+
     private function hasColumn(string $table, string $column): bool
     {
         if (! isset($this->columnExistsCache[$table])) {
@@ -668,10 +640,7 @@ $activeStaffCount = DB::table('users')
     private function itemQtyExpression(string $alias = 'bi'): string
     {
         $column = $this->firstExistingColumn('billing_items', [
-            'quantity',
-            'qty',
-            'units',
-            'count',
+            'quantity', 'qty', 'units', 'count',
         ]);
 
         return $column ? "COALESCE({$alias}.`{$column}`, 0)" : '0';
@@ -680,9 +649,7 @@ $activeStaffCount = DB::table('users')
     private function itemPriceExpression(string $alias = 'bi'): string
     {
         $column = $this->firstExistingColumn('billing_items', [
-            'unit_price',
-            'price',
-            'selling_price',
+            'unit_price', 'price', 'selling_price',
         ]);
 
         return $column ? "COALESCE({$alias}.`{$column}`, 0)" : '0';
@@ -691,10 +658,7 @@ $activeStaffCount = DB::table('users')
     private function lineAmountExpression(string $billingItemAlias = 'bi'): string
     {
         $explicitColumn = $this->firstExistingColumn('billing_items', [
-            'total',
-            'line_total',
-            'amount',
-            'subtotal',
+            'total', 'line_total', 'amount', 'subtotal',
         ]);
 
         $qtyExpr   = $this->itemQtyExpression($billingItemAlias);
@@ -710,20 +674,14 @@ $activeStaffCount = DB::table('users')
     private function itemCostExpression(string $billingItemAlias = 'bi', string $productAlias = 'p'): string
     {
         $explicitColumn = $this->firstExistingColumn('billing_items', [
-            'cost_total',
-            'total_cost',
-            'cost_amount',
+            'cost_total', 'total_cost', 'cost_amount',
         ]);
 
-        $qtyExpr = $this->itemQtyExpression($billingItemAlias);
-
+        $qtyExpr     = $this->itemQtyExpression($billingItemAlias);
         $unitCostParts = [];
 
         $billingItemUnitCost = $this->firstExistingColumn('billing_items', [
-            'cost_price',
-            'unit_cost',
-            'buying_price',
-            'purchase_price',
+            'cost_price', 'unit_cost', 'buying_price', 'purchase_price',
         ]);
 
         if ($billingItemUnitCost) {
@@ -731,9 +689,7 @@ $activeStaffCount = DB::table('users')
         }
 
         $productUnitCost = $this->firstExistingColumn('products', [
-            'cost_price',
-            'buying_price',
-            'purchase_price',
+            'cost_price', 'buying_price', 'purchase_price',
         ]);
 
         if ($productUnitCost) {
@@ -754,9 +710,7 @@ $activeStaffCount = DB::table('users')
     private function inventoryValueExpression(string $inventoryAlias = 'i', string $productAlias = 'p'): string
     {
         $inventoryValueCol = $this->firstExistingColumn('inventory', [
-            'stock_value',
-            'inventory_value',
-            'value',
+            'stock_value', 'inventory_value', 'value',
         ]);
 
         if ($inventoryValueCol) {
@@ -764,11 +718,7 @@ $activeStaffCount = DB::table('users')
         }
 
         $productCostCol = $this->firstExistingColumn('products', [
-            'cost_price',
-            'buying_price',
-            'purchase_price',
-            'selling_price',
-            'price',
+            'cost_price', 'buying_price', 'purchase_price', 'selling_price', 'price',
         ]);
 
         if ($productCostCol) {
@@ -795,7 +745,7 @@ $activeStaffCount = DB::table('users')
 
     private function customerNameExpression(string $alias = 'c'): string
     {
-        $parts = [];
+        $parts     = [];
         $nameParts = [];
 
         if ($this->hasColumn('customers', 'first_name')) {
@@ -823,7 +773,7 @@ $activeStaffCount = DB::table('users')
 
     private function userNameExpression(string $alias = 'u'): string
     {
-        $parts = [];
+        $parts     = [];
         $nameParts = [];
 
         if ($this->hasColumn('users', 'first_name')) {

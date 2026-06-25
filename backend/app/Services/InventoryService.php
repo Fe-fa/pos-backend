@@ -150,122 +150,122 @@ class InventoryService
     }
 
     public function consumeFifo(
-        User $user,
-        int $storeId,
-        int $productId,
-        int $quantity,
-        ?string $reason = null,
-        ?string $reference = null,
-    ): array {
-        return DB::transaction(function () use ($user, $storeId, $productId, $quantity, $reason, $reference) {
-            if ($quantity <= 0) {
-                abort(response()->json([
-                    'message' => 'Quantity must be greater than zero.',
-                ], 422));
-            }
+    User $user,
+    int $storeId,
+    int $productId,
+    int $quantity,
+    ?string $reason = null,
+    ?string $reference = null,
+): array {
+    return DB::transaction(function () use ($user, $storeId, $productId, $quantity, $reason, $reference) {
+        if ($quantity <= 0) {
+            abort(response()->json([
+                'message' => 'Quantity must be greater than zero.',
+            ], 422));
+        }
 
-$layers = Inventory::query()
-    ->where('store_id', $storeId)
-    ->where('product_id', $productId)
-    ->available()
-    ->fifo()
-    ->lockForUpdate()
-    ->with('product:product_id,product_name,sku')  // ← add this
-    ->get();
+        // ① Resolve product name FIRST — independent of inventory state
+        $product     = \App\Models\Product::select('product_id', 'product_name', 'sku')
+                            ->find($productId);
+        $productName = $product?->product_name ?? "Product #{$productId}";
+        $productSku  = $product?->sku ?? '';
 
-$availableQty = (int) $layers->sum('quantity');
-$reorderLevel = (int) $layers->max('reorder_level');
-$sellableQty  = max($availableQty - $reorderLevel, 0);
+        // ② Lock ALL layers (including zero-qty) to get accurate reorder_level
+        //    then filter available ones for consumption
+        $allLayers = Inventory::query()
+            ->where('store_id', $storeId)
+            ->where('product_id', $productId)
+            ->lockForUpdate()
+            ->fifo()
+            ->get();
 
-// Grab product name from the first layer (all layers share the same product)
-$productName = $layers->first()?->product?->product_name ?? "Product #{$productId}";
-$productSku  = $layers->first()?->product?->sku ?? '';
+        $layers       = $allLayers->where('quantity', '>', 0);
+        $availableQty = (int) $layers->sum('quantity');
+        $reorderLevel = (int) $allLayers->max('reorder_level');
+        $sellableQty  = max($availableQty - $reorderLevel, 0);
 
-if ($availableQty < $quantity) {
-    abort(response()->json([
-        'message'            =>'Insufficient stock for \"{$productName}\".',
-        'available_quantity' => $availableQty,
-        'requested_quantity' => $quantity,
-    ], 422));
-}
-
-if ($sellableQty < $quantity) {
-    abort(response()->json([
-        'message'            => "\"{$productName}\". Please restock before selling.",
-        'available_quantity' => $availableQty,
-        'reorder_level'      => $reorderLevel,
-        'sellable_quantity'  => $sellableQty,
-        'requested_quantity' => $quantity,
-        'product_name'       => $productName,
-        'sku'                => $productSku,
-    ], 422));
-}
-
-            $remaining = $quantity;
-            $consumedLayers = [];
-
-            foreach ($layers as $layer) {
-                if ($remaining <= 0) {
-                    break;
-                }
-
-                $before = (int) $layer->quantity;
-                $take = min($before, $remaining);
-                $after = $before - $take;
-
-                $layer->update([
-                    'quantity' => $after,
-                ]);
-
-                $this->logHistory(
-                    inventory: $layer,
-                    user: $user,
-                    quantityBefore: $before,
-                    quantityChanged: -$take,
-                    quantityAfter: $after,
-                    changeType: 'stock_out',
-                    reason: $reason ?? 'FIFO stock out',
-                    reference: $reference
-                );
-
-                $consumedLayers[] = [
-                    'inventory_id'    => $layer->inventory_id,
-                    'batch_no'        => $layer->batch_no,
-                    'quantity_before' => $before,
-                    'quantity_taken'  => $take,
-                    'quantity_after'  => $after,
-                ];
-
-                $remaining -= $take;
-            }
-
-            if (class_exists(StockMovement::class)) {
-                StockMovement::create([
-                    'product_id' => $productId,
-                    'store_id'   => $storeId,
-                    'quantity'   => -$quantity,
-                    'type'       => 'stock_out',
-                    'reason'     => $reason ?? 'FIFO stock out',
-                    'user_id'    => $user->user_id,
-                ]);
-            }
-
-            $remainingTotal = (int) Inventory::query()
-                ->where('store_id', $storeId)
-                ->where('product_id', $productId)
-                ->sum('quantity');
-
-            return [
-                'store_id'           => $storeId,
-                'product_id'         => $productId,
+        if ($availableQty < $quantity) {
+            abort(response()->json([
+                'message'            => "Insufficient stock for \"{$productName}\".",
+                'available_quantity' => $availableQty,
                 'requested_quantity' => $quantity,
-                'consumed_quantity'  => $quantity,
-                'remaining_quantity' => $remainingTotal,
-                'layers'             => $consumedLayers,
-            ];
-        });
-    }
+            ], 422));
+        }
 
+        if ($sellableQty < $quantity) {
+            abort(response()->json([
+                'message'            => "\"{$productName}\" is below reorder level. Please restock before selling.",
+                'available_quantity' => $availableQty,
+                'reorder_level'      => $reorderLevel,
+                'sellable_quantity'  => $sellableQty,
+                'requested_quantity' => $quantity,
+                'product_name'       => $productName,
+                'sku'                => $productSku,
+            ], 422));
+        }
+
+        $remaining      = $quantity;
+        $consumedLayers = [];
+
+        foreach ($layers as $layer) {
+            if ($remaining <= 0) {
+                break;
+            }
+
+            $before = (int) $layer->quantity;
+            $take   = min($before, $remaining);
+            $after  = $before - $take;
+
+            $layer->update(['quantity' => $after]);
+
+            $this->logHistory(
+                inventory:       $layer,
+                user:            $user,
+                quantityBefore:  $before,
+                quantityChanged: -$take,
+                quantityAfter:   $after,
+                changeType:      'stock_out',
+                reason:          $reason ?? 'FIFO stock out',
+                reference:       $reference
+            );
+
+            $consumedLayers[] = [
+                'inventory_id'    => $layer->inventory_id,
+                'batch_no'        => $layer->batch_no,
+                'quantity_before' => $before,
+                'quantity_taken'  => $take,
+                'quantity_after'  => $after,
+            ];
+
+            $remaining -= $take;
+        }
+
+        if (class_exists(StockMovement::class)) {
+            StockMovement::create([
+                'product_id' => $productId,
+                'store_id'   => $storeId,
+                'quantity'   => -$quantity,
+                'type'       => 'stock_out',
+                'reason'     => $reason ?? 'FIFO stock out',
+                'user_id'    => $user->user_id,
+            ]);
+        }
+
+        $remainingTotal = (int) Inventory::query()
+            ->where('store_id', $storeId)
+            ->where('product_id', $productId)
+            ->sum('quantity');
+
+        return [
+            'store_id'           => $storeId,
+            'product_id'         => $productId,
+            'requested_quantity' => $quantity,
+            'consumed_quantity'  => $quantity,
+            'remaining_quantity' => $remainingTotal,
+            'layers'             => $consumedLayers,
+        ];
+    });
+}
     public function show(Inventory $inventory): Inventory
     {
         return $inventory->load([

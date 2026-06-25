@@ -40,11 +40,13 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/sessions/{sessionId}', [AuthController::class, 'revokeSession'])->name('auth.sessions.destroy');
     });
 
-    Route::prefix('access-control')->group(function () {
-        Route::get('/', [AccessControlController::class, 'index']);
-        Route::put('/roles/{roleName}/permissions', [AccessControlController::class, 'updateRolePermissions']);
-        Route::put('/users/{user}/role', [AccessControlController::class, 'assignUserRole']);
-    });
+Route::prefix('access-control')->group(function () {
+    Route::get('/', [AccessControlController::class, 'index']);
+    Route::put('/roles/{roleName}/permissions', [AccessControlController::class, 'updateRolePermissions']);
+    Route::put('/users/{user}/role',            [AccessControlController::class, 'assignUserRole']);
+    Route::get('/users/{user}/permissions',     [AccessControlController::class, 'getUserPermissions']);
+    Route::put('/users/{user}/permissions',     [AccessControlController::class, 'updateUserPermissions']);
+});
 
     Route::apiResource('stores', StoreController::class);
     Route::get('stores/{store}/settings', [StoreController::class, 'settings'])->name('stores.settings');

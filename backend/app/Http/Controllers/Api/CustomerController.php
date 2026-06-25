@@ -16,22 +16,6 @@ class CustomerController extends Controller
 {
     use AuthorizesPermission;
 
-    // ─── FIX: Cache a plain int[] instead of a Collection object ─────────────
-    //
-    // ROOT CAUSE of "__PHP_Incomplete_Class returned":
-    //   The old code cached the result of ->values() which is an Eloquent
-    //   Collection. Laravel serializes it with PHP's serialize(), embedding
-    //   the fully-qualified class name. On a cache hit, PHP calls unserialize()
-    //   — if the class isn't autoloaded at that exact moment (fresh deploy,
-    //   worker restart, opcache mismatch) it produces __PHP_Incomplete_Class
-    //   instead of throwing, silently breaking the return-type contract.
-    //
-    // FIX:
-    //   Cache ->toArray() — a plain PHP int[]. Scalar arrays survive any
-    //   PHP/framework version change without class resolution.
-    //   On read, wrap in collect() here so every caller still receives a
-    //   Collection and nothing else in the file needs changing.
-    // ─────────────────────────────────────────────────────────────────────────
     private function allowedStoreIds($user): Collection
     {
         $ids = Cache::remember(
@@ -44,16 +28,15 @@ class CustomerController extends Controller
                 ->unique()
                 ->values()
                 ->map(fn ($id) => (int) $id)
-                ->toArray()              // ← store plain int[], not a Collection
+                ->toArray()
         );
 
-        // If a stale cache entry somehow still holds an object, recover cleanly.
         if (!is_array($ids)) {
             Cache::forget("user_store_ids_{$user->user_id}");
             return $this->allowedStoreIds($user);
         }
 
-        return collect($ids);            // ← always returns a real Collection
+        return collect($ids);
     }
 
     private function authorizeStoreAccess($user, $storeId): void
@@ -75,6 +58,8 @@ class CustomerController extends Controller
 
     public function index(Request $request): JsonResponse
     {
+        if ($error = $this->authorizePermission('customers.view')) return $error;
+
         $user    = $request->user();
         $perPage = max(1, min((int) $request->get('per_page', 6), 50));
 
@@ -154,9 +139,11 @@ class CustomerController extends Controller
         ], 201);
     }
 
-    public function show(Customer $customer): JsonResponse
+    public function show(Request $request, Customer $customer): JsonResponse
     {
-        $this->authorizeStoreAccess(request()->user(), $customer->store_id);
+        if ($error = $this->authorizePermission('customers.view')) return $error;
+
+        $this->authorizeStoreAccess($request->user(), $customer->store_id);
 
         $customer->loadSum(
             ['billings as current_balance' => fn ($q) => $q

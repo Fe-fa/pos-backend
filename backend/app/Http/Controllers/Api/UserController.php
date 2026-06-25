@@ -20,6 +20,8 @@ class UserController extends Controller
 
     public function index(Request $request): JsonResponse
     {
+        if ($error = $this->authorizePermission('users.view')) return $error;
+
         $actor            = $request->user();
         $requestedStoreId = $this->requestedStoreId($request);
         $perPage          = max(1, min((int) ($request->per_page ?? 6), 100));
@@ -144,6 +146,8 @@ class UserController extends Controller
 
     public function show(Request $request, User $user): JsonResponse
     {
+        if ($error = $this->authorizePermission('users.view')) return $error;
+
         $actor            = $request->user();
         $requestedStoreId = $this->requestedStoreId($request);
 

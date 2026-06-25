@@ -19,10 +19,11 @@ class BillingController extends Controller
 
     public function index(Request $request): JsonResponse
     {
+        if ($error = $this->authorizePermission('billings.view')) return $error;
+
         $perPage = max(1, min((int) ($request->per_page ?? 15), 100));
         $user    = $request->user();
 
-        // Authorize store access if a specific store is requested
         if ($request->filled('store_id')) {
             $this->service->authorizeStoreAccess($user, $request->store_id);
         }
@@ -59,18 +60,13 @@ class BillingController extends Controller
             ->withCount('items')
             ->withSum('items', 'quantity');
 
-        // Apply soft-delete scope before scopeAccessible
         if ($request->boolean('only_trashed')) {
             $query->onlyTrashed();
         } elseif ($request->boolean('with_trashed')) {
             $query->withTrashed();
         }
 
-        // Apply role-based access scoping
         $query = $this->service->scopeAccessible($query, $user);
-
-        // Apply all request filters via service — includes customer_id,
-        // comma-separated status, is_draft, fulfillment_*, store_id
         $query = $this->service->applyListFilters($query, $request->only([
             'store_id',
             'customer_id',
@@ -105,8 +101,10 @@ class BillingController extends Controller
         ], 201);
     }
 
-    public function show($id): JsonResponse
+    public function show(Request $request, $id): JsonResponse
     {
+        if ($error = $this->authorizePermission('billings.view')) return $error;
+
         $billing = Billing::withTrashed()->find($id);
 
         if (!$billing) {

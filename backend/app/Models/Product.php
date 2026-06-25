@@ -24,6 +24,7 @@ class Product extends Model
         'category_id',
         'sku',
         'product_name',
+        'description', 
         'price',
         'cost_price',
         'vat_rate',
@@ -77,5 +78,9 @@ class Product extends Model
 public function store(): BelongsTo
 {
     return $this->belongsTo(Store::class, 'store_id', 'store_id');
+}
+public function getRouteKeyName(): string
+{
+    return 'product_id';
 }
 }

@@ -31,6 +31,7 @@ class UpdateProductRequest extends FormRequest
                     ->ignore($productId, 'product_id'),
             ],
             'product_name'  => ['sometimes', 'required', 'string', 'max:255'],
+            'description' => ['nullable', 'string', 'max:1000'],
             'price'         => ['sometimes', 'required', 'numeric', 'min:0'],
             'cost_price'    => ['sometimes', 'required', 'numeric', 'min:0'],
             'vat_rate'      => ['nullable', 'numeric', 'min:0'],

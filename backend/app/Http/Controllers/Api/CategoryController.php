@@ -19,50 +19,52 @@ class CategoryController extends Controller
         private readonly CategoryService $service
     ) {}
 
-public function index(Request $request): JsonResponse
-{
-    $perPage = max(1, min((int) ($request->per_page ?? 5), 100));
-    $user    = $request->user();
+    public function index(Request $request): JsonResponse
+    {
+        if ($error = $this->authorizePermission('categories.view')) return $error;
 
-    if ($request->filled('store_id')) {
-        $this->service->authorizeStoreAccess($user, (int) $request->store_id);
+        $perPage = max(1, min((int) ($request->per_page ?? 5), 100));
+        $user    = $request->user();
+
+        if ($request->filled('store_id')) {
+            $this->service->authorizeStoreAccess($user, (int) $request->store_id);
+        }
+
+        $query = Category::query()
+            ->select([
+                'category_id',
+                'store_id',
+                'category_name',
+            ])
+            ->withCount('products');
+
+        if (!$user->isAdmin()) {
+            $query->whereIn('categories.store_id', $this->service->allowedStoreIds($user));
+        }
+
+        $query
+            ->when($request->filled('store_id'), fn($q) =>
+                $q->where('categories.store_id', (int) $request->store_id)
+            )
+            ->when($request->filled('search'), fn($q) =>
+                $q->where('categories.category_name', 'like', '%' . trim($request->search) . '%')
+            )
+            ->orderBy('categories.category_name');
+
+        $categories = $query->paginate($perPage);
+
+        return response()->json([
+            'data' => $categories->items(),
+            'meta' => [
+                'current_page' => $categories->currentPage(),
+                'last_page'    => $categories->lastPage(),
+                'per_page'     => $categories->perPage(),
+                'total'        => $categories->total(),
+                'from'         => $categories->firstItem(),
+                'to'           => $categories->lastItem(),
+            ],
+        ]);
     }
-
-    $query = Category::query()
-        ->select([
-            'category_id',
-            'store_id',
-            'category_name',
-        ])
-        ->withCount('products');
-
-    if (!$user->isAdmin()) {
-        $query->whereIn('categories.store_id', $this->service->allowedStoreIds($user));
-    }
-
-    $query
-        ->when($request->filled('store_id'), fn($q) =>
-            $q->where('categories.store_id', (int) $request->store_id)
-        )
-        ->when($request->filled('search'), fn($q) =>
-            $q->where('categories.category_name', 'like', '%' . trim($request->search) . '%')
-        )
-        ->orderBy('categories.category_name');
-
-    $categories = $query->paginate($perPage);
-
-    return response()->json([
-        'data' => $categories->items(),
-        'meta' => [
-            'current_page' => $categories->currentPage(),
-            'last_page'    => $categories->lastPage(),
-            'per_page'     => $categories->perPage(),
-            'total'        => $categories->total(),
-            'from'         => $categories->firstItem(),
-            'to'           => $categories->lastItem(),
-        ],
-    ]);
-}
 
     public function store(StoreCategoryRequest $request): JsonResponse
     {
@@ -76,7 +78,8 @@ public function index(Request $request): JsonResponse
 
     public function show(Request $request, Category $category): JsonResponse
     {
-        // Ensure the user can access the store this category belongs to
+        if ($error = $this->authorizePermission('categories.view')) return $error;
+
         $this->service->authorizeStoreAccess($request->user(), $category->store_id);
 
         return response()->json([
@@ -89,7 +92,6 @@ public function index(Request $request): JsonResponse
     {
         if ($error = $this->authorizePermission('categories.manage')) return $error;
 
-        // Double-check store ownership even after permission gate
         $this->service->authorizeStoreAccess($request->user(), $category->store_id);
 
         return response()->json([
@@ -102,7 +104,6 @@ public function index(Request $request): JsonResponse
     {
         if ($error = $this->authorizePermission('categories.manage')) return $error;
 
-        // Double-check store ownership even after permission gate
         $this->service->authorizeStoreAccess($request->user(), $category->store_id);
 
         $this->service->delete($request->user(), $category);

@@ -17,7 +17,7 @@ class RolePermissionSeeder extends Seeder
         app(PermissionRegistrar::class)->forgetCachedPermissions();
 
         $allPermissions = [
-            // ── Page access ──────────────────────────────────────────
+            // ── Page visibility (controls nav links & route access) ───
             'page.dashboard',
             'page.stores',
             'page.users',
@@ -28,30 +28,40 @@ class RolePermissionSeeder extends Seeder
             'page.customers',
             'page.billings',
             'page.orders',
+            'page.payments',
+            'page.reports',
             'page.access_control',
             'page.settings',
-            'page.pos',
-            'page.reports',
 
-            // ── Store & user management ───────────────────────────────
+            // ── View/read (list + show, enforced by policies) ─────────
+            'stores.view',
+            'users.view',
+            'cashiers.view',
+            'categories.view',
+            'products.view',
+            'inventory.view',
+            'customers.view',
+            'billings.view',
+            'orders.view',
+            'payments.view',
+            'reports.view',
+
+            // ── Manage (create + update + delete, enforced by policies)
             'stores.manage',
-            'stores.assign',
             'users.manage',
-            'users.assign',
-
-            // ── Catalog ───────────────────────────────────────────────
+            'cashiers.manage',
             'categories.manage',
             'products.manage',
             'inventory.manage',
-
-            // ── Customers ─────────────────────────────────────────────
             'customers.manage',
-
-            // ── Billing & payments ────────────────────────────────────
             'billings.manage',
             'orders.manage',
-            'payments.charge',
-            'payments.manage', 
+            'payments.manage',
+
+            // ── Cross-cutting ─────────────────────────────────────────
+            'stores.assign',    // link/unlink stores to users
+            'users.assign',     // assign roles to users
+            'payments.charge',  // process a charge at POS
 
             // ── POS actions ───────────────────────────────────────────
             'pos.access',
@@ -62,8 +72,12 @@ class RolePermissionSeeder extends Seeder
             'pos.price_override',
         ];
 
+        // ── Admin: everything ─────────────────────────────────────────
+        $adminPermissions = $allPermissions;
+
+        // ── Manager: full ops + catalog, no system pages ──────────────
         $managerPermissions = [
-            // Pages — managers see everything except access control & settings
+            // Pages
             'page.dashboard',
             'page.stores',
             'page.users',
@@ -74,20 +88,37 @@ class RolePermissionSeeder extends Seeder
             'page.customers',
             'page.billings',
             'page.orders',
-            'page.pos',
+            'page.payments',
             'page.reports',
 
-            // Actions
+            // View
+            'stores.view',
+            'users.view',
+            'cashiers.view',
+            'categories.view',
+            'products.view',
+            'inventory.view',
+            'customers.view',
+            'billings.view',
+            'orders.view',
+            'payments.view',
+            'reports.view',
+
+            // Manage
             'stores.assign',
             'users.manage',
             'users.assign',
+            'cashiers.manage',
             'categories.manage',
             'products.manage',
             'inventory.manage',
             'customers.manage',
             'billings.manage',
             'orders.manage',
+            'payments.manage',
             'payments.charge',
+
+            // POS
             'pos.access',
             'pos.draft',
             'pos.void',
@@ -96,21 +127,27 @@ class RolePermissionSeeder extends Seeder
             'pos.price_override',
         ];
 
+        // ── Cashier: counter-only, view-first, limited manage ─────────
+        // No page.* by default — cashier nav is driven by pos.access
+        // and any extra page.* granted individually via access control.
         $cashierPermissions = [
-            // Pages — cashiers only see what they need at the counter
-            'page.dashboard',
-            'page.pos',
-            'page.customers',
-            'page.orders',
-            'page.billings',
+            // View — needs to read these to do their job at the counter
+            'products.view',
+            'categories.view',
+            'customers.view',
+            'orders.view',
+            'billings.view',
+            'payments.view',
 
-            // Actions
+            // Manage — only what a cashier acts on
             'customers.manage',
             'billings.manage',
+            'orders.manage',
             'payments.charge',
+
+            // POS
             'pos.access',
             'pos.draft',
-            'payments.manage',
         ];
 
         foreach ($allPermissions as $permission) {
@@ -121,7 +158,7 @@ class RolePermissionSeeder extends Seeder
         $manager = Role::findOrCreate(User::ROLE_MANAGER, self::GUARD);
         $cashier = Role::findOrCreate(User::ROLE_CASHIER, self::GUARD);
 
-        $admin->syncPermissions($allPermissions);
+        $admin->syncPermissions($adminPermissions);
         $manager->syncPermissions($managerPermissions);
         $cashier->syncPermissions($cashierPermissions);
 

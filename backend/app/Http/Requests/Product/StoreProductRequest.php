@@ -25,6 +25,7 @@ class StoreProductRequest extends FormRequest
                     ->where(fn ($q) => $q->where('store_id', $this->input('store_id'))),
             ],
             'product_name'  => ['required', 'string', 'max:255'],
+            'description' => ['nullable', 'string', 'max:1000'],
             'price'         => ['required', 'numeric', 'min:0'],
             'cost_price'    => ['required', 'numeric', 'min:0'],
             'vat_rate'      => ['nullable', 'numeric', 'min:0'],

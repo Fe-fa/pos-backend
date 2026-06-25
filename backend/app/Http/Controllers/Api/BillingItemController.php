@@ -24,6 +24,8 @@ class BillingItemController extends Controller
 
     public function index(Request $request, Billing $billing): JsonResponse
     {
+        if ($error = $this->authorizePermission('billings.view')) return $error;
+
         $perPage = max(1, min((int) $request->get('per_page', 10), 50));
 
         $query = $billing->items()
@@ -81,8 +83,10 @@ class BillingItemController extends Controller
         ], 201);
     }
 
-    public function show(int $id): JsonResponse
+    public function show(Request $request, int $id): JsonResponse
     {
+        if ($error = $this->authorizePermission('billings.view')) return $error;
+
         $billingItem = BillingItem::withTrashed()
             ->with(['product.category', 'billing'])
             ->findOrFail($id);
@@ -103,7 +107,7 @@ class BillingItemController extends Controller
         ]);
     }
 
-    public function destroy(BillingItem $billingItem): JsonResponse
+    public function destroy(Request $request, BillingItem $billingItem): JsonResponse
     {
         if ($error = $this->authorizePermission('billings.manage')) return $error;
 
@@ -114,7 +118,7 @@ class BillingItemController extends Controller
         ]);
     }
 
-    public function restore(int $id): JsonResponse
+    public function restore(Request $request, int $id): JsonResponse
     {
         if ($error = $this->authorizePermission('billings.manage')) return $error;
 

@@ -19,6 +19,8 @@ class StoreController extends Controller
 
     public function index(Request $request): JsonResponse
     {
+        if ($error = $this->authorizePermission('stores.view')) return $error;
+
         $user    = $request->user();
         $perPage = max(1, min((int) $request->get('per_page', 2), 100));
 
@@ -75,6 +77,8 @@ class StoreController extends Controller
 
     public function show(Request $request, Store $store): JsonResponse
     {
+        if ($error = $this->authorizePermission('stores.view')) return $error;
+
         if (! $this->canAccessStore($request->user(), $store->store_id)) {
             return response()->json(['message' => 'You do not have access to this store.'], 403);
         }
@@ -111,6 +115,8 @@ class StoreController extends Controller
 
     public function settings(Request $request, Store $store): JsonResponse
     {
+        if ($error = $this->authorizePermission('stores.view')) return $error;
+
         if (! $this->canAccessStore($request->user(), $store->store_id)) {
             return response()->json(['message' => 'You do not have access to this store.'], 403);
         }
@@ -130,7 +136,7 @@ class StoreController extends Controller
     {
         if ($error = $this->authorizePermission('stores.manage')) return $error;
 
-        $validated        = $request->validated();
+        $validated         = $request->validated();
         $incomingSettings  = $validated['settings'] ?? [];
         $incomingSequences = $validated['document_sequences'] ?? [];
 

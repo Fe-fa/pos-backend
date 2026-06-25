@@ -61,6 +61,7 @@ class ProductService
             'category_id'  => $data['category_id'],
             'sku'          => $data['sku'],
             'product_name' => $data['product_name'],
+            'description'  => $data['description'] ?? null,
             'price'        => $data['price'],
             'cost_price'   => $data['cost_price'],
             'vat_rate'     => $data['vat_rate'] ?? 0,
@@ -109,6 +110,9 @@ class ProductService
             'category_id'  => $data['category_id']  ?? $product->category_id,
             'sku'          => $data['sku']           ?? $product->sku,
             'product_name' => $data['product_name']  ?? $product->product_name,
+            'description'  => array_key_exists('description', $data)
+                   ? $data['description']
+                  : $product->description,
             'price'        => $data['price']         ?? $product->price,
             'cost_price'   => $data['cost_price']    ?? $product->cost_price,
             'vat_rate'     => array_key_exists('vat_rate', $data)
