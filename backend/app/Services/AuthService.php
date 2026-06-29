@@ -8,37 +8,83 @@ use Illuminate\Validation\ValidationException;
 
 class AuthService
 {
-    public function register(array $data): User
-    {
-        $user = User::create([
-            'first_name' => $data['first_name'],
-            'last_name' => $data['last_name'],
-            'username' => $data['username'],
-            'email' => $data['email'],
-            'phone' => $data['phone'] ?? null,
-            'password' => $data['password'],
-            'role' => User::ROLE_CASHIER,
-            'default_store_id' => null,
-            'shift_name' => null,
-            'shift_start' => null,
-            'shift_end' => null,
-            'is_active' => true,
-            'is_verified' => false,
-            'email_verified_at' => app()->environment('local') ? now() : null,
-        ]);
+public function register(array $data): User
+{
+    $code = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
 
-        $user->syncRoles([User::ROLE_CASHIER]);
+    $user = User::create([
+        'first_name'        => $data['first_name'],
+        'last_name'         => $data['last_name'],
+        'username'          => $data['username'],
+        'email'             => $data['email'],
+        'phone'             => $data['phone'] ?? null,
+        'password'          => $data['password'],
+        'role'              => User::ROLE_CASHIER,
+        'is_active'         => true,
+        'is_verified'       => false,
+        'email_verified_at' => null,          
+        'verification_code'   => bcrypt($code),
+        'verification_expiry' => now()->addMinutes(15),
+    ]);
 
-        try {
-            if (! app()->environment('local')) {
-                $user->sendEmailVerificationNotification();
-            }
-        } catch (\Throwable $e) {
-            report($e);
-        }
+    $user->syncRoles([User::ROLE_CASHIER]);
 
-        return $user;
+    try {
+        $user->notify(new \App\Notifications\EmailVerificationCode($code));
+    } catch (\Throwable $e) {
+        report($e);
     }
+
+    return $user;
+}
+
+public function verifyEmailCode(User $user, string $code): void
+{
+    if ($user->hasVerifiedEmail()) {
+        return; // already verified — no-op
+    }
+
+    if (
+        empty($user->verification_code) ||
+        empty($user->verification_expiry) ||
+        now()->isAfter($user->verification_expiry)
+    ) {
+        throw \Illuminate\Validation\ValidationException::withMessages([
+            'code' => ['Verification code has expired. Please request a new one.'],
+        ]);
+    }
+
+    if (! \Hash::check($code, $user->verification_code)) {
+        throw \Illuminate\Validation\ValidationException::withMessages([
+            'code' => ['Invalid verification code.'],
+        ]);
+    }
+
+    $user->forceFill([
+        'email_verified_at'  => now(),
+        'is_verified'        => true,
+        'verification_code'  => null,
+        'verification_expiry'=> null,
+    ])->save();
+}
+
+public function resendVerificationCode(User $user): void
+{
+    if ($user->hasVerifiedEmail()) {
+        throw \Illuminate\Validation\ValidationException::withMessages([
+            'email' => ['Email is already verified.'],
+        ]);
+    }
+
+    $code = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+
+    $user->forceFill([
+        'verification_code'   => bcrypt($code),
+        'verification_expiry' => now()->addMinutes(15),
+    ])->save();
+
+    $user->notify(new \App\Notifications\EmailVerificationCode($code));
+}
 
     public function login(array $credentials): array
     {

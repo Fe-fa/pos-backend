@@ -60,25 +60,26 @@ if ($pointsToRedeem < 0) {
 }
 
 if ($pointsToRedeem > 0 && $billing->customer_id) {
+    // Always re-fetch from DB — never trust client-sent value
     $customerPoints = $this->loyaltyService->getCustomerPoints(
         (int) $billing->store_id,
         (int) $billing->customer_id
     );
 
-    if ($pointsToRedeem > $customerPoints) {
-        abort(response()->json([
-            'message' => 'Points redeemed exceed customer available balance.',
-        ], 422));
+    // Silently clamp instead of aborting — frontend may send slightly stale value
+    $pointsToRedeem = min($pointsToRedeem, $customerPoints);
+
+    if ($pointsToRedeem <= 0) {
+        $pointsToRedeem = 0;
     }
 
-    $activeRule   = $this->loyaltyService->getActiveRule((int) $billing->store_id);
-    $pointValue   = (float) ($activeRule?->point_value ?? 1);
-    $maxByInvoice = (int) floor((float) $billing->total / $pointValue);
+    if ($pointsToRedeem > 0) {
+        $activeRule   = $this->loyaltyService->getActiveRule((int) $billing->store_id);
+        $pointValue   = (float) ($activeRule?->point_value ?? 1);
+        $maxByInvoice = (int) floor((float) $billing->total / $pointValue);
 
-    if ($pointsToRedeem > $maxByInvoice) {
-        abort(response()->json([
-            'message' => 'Points redeemed would exceed the invoice total.',
-        ], 422));
+        // Clamp to invoice ceiling too
+        $pointsToRedeem = min($pointsToRedeem, $maxByInvoice);
     }
 }
 
@@ -335,4 +336,79 @@ $freshCustomerBalance = round((float) Billing::where('customer_id', $customerId)
             ]);
         });
     }
+    public function chargeCart(User $user, array $data): array
+{
+    $this->billingService->authorizeStoreAccess($user, $data['store_id']);
+
+    return DB::transaction(function () use ($user, $data) {
+        $billing = Billing::create([
+            'store_id'           => $data['store_id'],
+            'customer_id'        => $data['customer_id'] ?? null,
+            'user_id'            => $user->user_id,
+            'invnumber'          => null,
+            'status'             => 'unpaid',
+            'subtotal'           => 0,
+            'vat_amount'         => 0,
+            'total'              => 0,
+            'paid_amount'        => 0,
+            'balance_due'        => 0,
+            'is_draft'           => true,
+            'billing_date'       => now(),
+            'notes'              => $data['notes'] ?? null,
+            'fulfillment_status' => 'pending',
+            'fulfillment_type'   => 'walk_in_counter',
+        ]);
+
+        foreach ($data['items'] as $item) {
+            $qty = (int) $item['quantity'];
+            $unitPrice = round((float) $item['price'], 2);
+            $vatRate = (float) ($item['vat_rate'] ?? 16);
+
+            $totalAmount = round($qty * $unitPrice, 2);
+            $lineSubtotal = round($totalAmount / (1 + ($vatRate / 100)), 2);
+            $vatAmount = round($totalAmount - $lineSubtotal, 2);
+
+            $billing->items()->create([
+                'product_id'    => (int) $item['product_id'],
+                'quantity'      => $qty,
+                'unit_price'    => $unitPrice,
+                'vat_rate'      => $vatRate,
+                'line_subtotal' => $lineSubtotal,
+                'vat_amount'    => $vatAmount,
+                'total_amount'  => $totalAmount,
+            ]);
+        }
+
+        $billing = $this->billingService->recalculateTotals($billing->fresh());
+
+        $payment = $this->charge($billing, $user, [
+            'payment_method'  => $data['payment_method'],
+            'amount_received' => (float) ($data['amount_received'] ?? $data['amount_tendered'] ?? 0),
+            'amount_tendered' => (float) ($data['amount_tendered'] ?? 0),
+            'points_redeemed' => (int) ($data['points_redeemed'] ?? 0),
+            'mpesa_phone'     => $data['mpesa_phone'] ?? null,
+            'mpesa_code'      => $data['mpesa_code'] ?? null,
+            'card_reference'  => $data['card_reference'] ?? null,
+            'card_holder'     => $data['card_holder'] ?? null,
+        ]);
+
+        $freshBilling = Billing::with([
+            'customer',
+            'store',
+            'user',
+            'items.product.category',
+            'payments',
+        ])->findOrFail($billing->billing_id);
+
+        return [
+            'billing' => $freshBilling,
+            'payment' => $payment->fresh()->load([
+                'billing.customer',
+                'billing.store',
+                'billing.user',
+            ]),
+        ];
+    });
+}
+
 }

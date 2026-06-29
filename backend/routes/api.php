@@ -18,6 +18,7 @@ use App\Http\Controllers\Api\RewardRuleController;
 use App\Http\Controllers\Api\SuperAdminDashboardController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\ManagerDashboardController;
+use App\Http\Controllers\Api\PosSessionController;
 
 
 Route::prefix('auth')->group(function () {
@@ -38,6 +39,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/sessions', [AuthController::class, 'sessions'])->name('auth.sessions.index');
         Route::delete('/sessions', [AuthController::class, 'revokeAllSessions'])->name('auth.sessions.destroyAll');
         Route::delete('/sessions/{sessionId}', [AuthController::class, 'revokeSession'])->name('auth.sessions.destroy');
+
     });
 
 Route::prefix('access-control')->group(function () {
@@ -47,6 +49,10 @@ Route::prefix('access-control')->group(function () {
     Route::get('/users/{user}/permissions',     [AccessControlController::class, 'getUserPermissions']);
     Route::put('/users/{user}/permissions',     [AccessControlController::class, 'updateUserPermissions']);
 });
+
+        Route::get('/pos-session', [PosSessionController::class, 'show']);
+        Route::put('/pos-session', [PosSessionController::class, 'upsert']);
+        Route::delete('/pos-session', [PosSessionController::class, 'destroy']);
 
     Route::apiResource('stores', StoreController::class);
     Route::get('stores/{store}/settings', [StoreController::class, 'settings'])->name('stores.settings');
@@ -65,6 +71,7 @@ Route::prefix('access-control')->group(function () {
     Route::apiResource('inventory', InventoryController::class)->parameters([
         'inventory' => 'inventoryItem',
     ]);
+    Route::patch('inventory/{inventoryItem}/adjust', [InventoryController::class, 'adjust']);
 
     Route::apiResource('customers', CustomerController::class);
     Route::apiResource('billings', BillingController::class);
@@ -76,6 +83,7 @@ Route::prefix('access-control')->group(function () {
     Route::get('billings/{billing}/items', [BillingItemController::class, 'index'])->name('billings.items.index');
     Route::post('billings/{billing}/items', [BillingItemController::class, 'store'])->name('billings.items.store');
 
+    Route::post('billings/charge', [PaymentController::class, 'chargeCart'])->name('billings.charge.cart');
     Route::post('billings/{billing}/charge', [PaymentController::class, 'charge'])->name('billings.charge');
 
         Route::prefix('reward-rules')->group(function () {
@@ -97,7 +105,9 @@ Route::prefix('dashboard/manager')->group(function () {
     Route::get('/',         [ManagerDashboardController::class, 'summary'])->name('dashboard.manager.summary');
     Route::get('/trends',   [ManagerDashboardController::class, 'trends'])->name('dashboard.manager.trends');
     Route::get('/activity', [ManagerDashboardController::class, 'activity'])->name('dashboard.manager.activity');
+    Route::post('/finalize-shift', [ManagerDashboardController::class, 'finalizeShift'])->name('dashboard.manager.finalize-shift');
 });
+
 
         Route::get('payments', [PaymentController::class, 'index'])->name('payments.index');
       Route::get('payments/{payment:payment_id}', [PaymentController::class, 'show']);

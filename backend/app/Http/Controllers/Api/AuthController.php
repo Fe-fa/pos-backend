@@ -26,19 +26,31 @@ class AuthController extends Controller
         ], 201);
     }
 
-    public function login(LoginRequest $request): JsonResponse
-    {
-        $result = $this->authService->login($request->validated());
+public function login(LoginRequest $request): JsonResponse
+{
+    $result = $this->authService->login($request->validated());
 
+    // Block login if email not verified
+    if (! $result['user']['email_verified']) {
+        // Issue a short-lived token only for verification use
         return response()->json([
-            'message' => 'Login successful.',
-            'token_type' => $result['token_type'],
-            'access_token' => $result['access_token'],
-            'expires_at' => $result['expires_at'],
-            'refresh_expires_at' => $result['refresh_expires_at'],
-            'user' => $result['user'],
-        ]);
+            'message'              => 'Email not verified.',
+            'requires_verification'=> true,
+            'access_token'         => $result['access_token'], // needed to call /verify-email
+            'token_type'           => $result['token_type'],
+            'user'                 => $result['user'],
+        ], 403);
     }
+
+    return response()->json([
+        'message'      => 'Login successful.',
+        'token_type'   => $result['token_type'],
+        'access_token' => $result['access_token'],
+        'expires_at'   => $result['expires_at'],
+        'refresh_expires_at' => $result['refresh_expires_at'],
+        'user'         => $result['user'],
+    ]);
+}
 
     public function refresh(Request $request): JsonResponse
     {
@@ -74,25 +86,21 @@ class AuthController extends Controller
         return response()->json(['message' => 'Logged out from all devices.']);
     }
 
-    public function verifyEmail(Request $request): JsonResponse
-    {
-        if ($request->user()->hasVerifiedEmail()) {
-            return response()->json(['message' => 'Email already verified.']);
-        }
+public function verifyEmail(Request $request): JsonResponse
+{
+    $request->validate(['code' => ['required', 'string', 'digits:6']]);
 
-        $request->user()->markEmailAsVerified();
-        return response()->json(['message' => 'Email verified successfully.']);
-    }
+    $this->authService->verifyEmailCode($request->user(), $request->input('code'));
 
-    public function resendVerification(Request $request): JsonResponse
-    {
-        if ($request->user()->hasVerifiedEmail()) {
-            return response()->json(['message' => 'Email already verified.']);
-        }
+    return response()->json(['message' => 'Email verified successfully.']);
+}
 
-        $request->user()->sendEmailVerificationNotification();
-        return response()->json(['message' => 'Verification email resent.']);
-    }
+public function resendVerification(Request $request): JsonResponse
+{
+    $this->authService->resendVerificationCode($request->user());
+
+    return response()->json(['message' => 'Verification code sent to your email.']);
+}
 
     public function forgotPassword(ForgotPasswordRequest $request): JsonResponse
     {

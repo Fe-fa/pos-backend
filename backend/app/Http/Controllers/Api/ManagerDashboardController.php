@@ -81,25 +81,16 @@ class ManagerDashboardController extends Controller
         $dayOfMonth  = max((int) $now->day, 1);
         $daysInMonth = (int) $now->daysInMonth;
 
-        $stores = Store::query()
+$stores = Store::query()
             ->select(['store_id', 'store_name', 'currency'])
             ->whereIntegerInRaw('store_id', $storeIds)
             ->get();
 
         $currency = $stores->first()?->currency ?? 'KES';
 
-        $loyaltyIssuedCol = $this->firstExistingColumn('billing', [
-            'loyalty_points_issued',
-            'loyalty_points_earned',
-            'points_earned',
-            'points_awarded',
-        ]);
-
-        $loyaltyRedeemedCol = $this->firstExistingColumn('billing', [
-            'loyalty_points_redeemed',
-            'points_redeemed',
-            'redeemed_points',
-        ]);
+    $fulfillmentPendingExpr = $this->hasColumn('billing', 'fulfillment_status')
+            ? "(fulfillment_status IS NULL OR fulfillment_status = 'pending')"
+            : "0";
 
         $billingAgg = DB::table('billing')
             ->selectRaw("
@@ -112,10 +103,10 @@ class ManagerDashboardController extends Controller
                 COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('paid','partial') AND is_draft = 0 THEN 1 END) AS today_transactions,
                 COUNT(CASE WHEN DATE(billing_date) = '{$yesterday}' AND `status` IN ('paid','partial') AND is_draft = 0 THEN 1 END) AS yesterday_transactions,
 
-                COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND (is_draft = 1 OR `status` IN ('void','voided','cancelled','canceled')) THEN 1 END) AS today_voids,
-                COUNT(CASE WHEN DATE(billing_date) = '{$yesterday}' AND (is_draft = 1 OR `status` IN ('void','voided','cancelled','canceled')) THEN 1 END) AS yesterday_voids,
+                COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('void','voided','cancelled','canceled') THEN 1 END) AS today_voids,
+                COUNT(CASE WHEN DATE(billing_date) = '{$yesterday}' AND `status` IN ('void','voided','cancelled','canceled') THEN 1 END) AS yesterday_voids,
 
-                COUNT(CASE WHEN (is_draft = 1 OR `status` IN ('draft','parked','quote','pending')) THEN 1 END) AS pending_orders_count,
+                COUNT(CASE WHEN {$fulfillmentPendingExpr} THEN 1 END) AS pending_orders_count,
 
                 COUNT(DISTINCT CASE
                     WHEN DATE(billing_date) = '{$today}' AND `status` IN ('paid','partial') AND is_draft = 0
@@ -128,20 +119,6 @@ class ManagerDashboardController extends Controller
                     THEN paid_amount ELSE 0
                 END) AS month_sales
             ")
-            ->when($loyaltyIssuedCol, function ($q) use ($today, $loyaltyIssuedCol) {
-                $q->selectRaw("
-                    SUM(CASE WHEN DATE(billing_date) = '{$today}' THEN COALESCE(`{$loyaltyIssuedCol}`, 0) ELSE 0 END) AS loyalty_issued_today
-                ");
-            }, function ($q) {
-                $q->selectRaw("0 AS loyalty_issued_today");
-            })
-            ->when($loyaltyRedeemedCol, function ($q) use ($today, $loyaltyRedeemedCol) {
-                $q->selectRaw("
-                    SUM(CASE WHEN DATE(billing_date) = '{$today}' THEN COALESCE(`{$loyaltyRedeemedCol}`, 0) ELSE 0 END) AS loyalty_redeemed_today
-                ");
-            }, function ($q) {
-                $q->selectRaw("0 AS loyalty_redeemed_today");
-            })
             ->whereIntegerInRaw('store_id', $storeIds)
             ->whereNull('deleted_at')
             ->first();
@@ -208,6 +185,21 @@ class ManagerDashboardController extends Controller
         }
 
         $newCustomersToday = $newCustomersTodayQuery->count();
+
+        $loyaltyAgg = DB::table('loyalty_transactions')
+            ->selectRaw("
+                SUM(CASE
+                    WHEN transaction_type = 'earned' AND points > 0
+                    AND DATE(created_at) = '{$today}'
+                    THEN points ELSE 0
+                END) AS issued_today,
+                SUM(CASE
+                    WHEN transaction_type = 'redeemed' AND DATE(created_at) = '{$today}'
+                    THEN ABS(points) ELSE 0
+                END) AS redeemed_today
+            ")
+            ->whereIntegerInRaw('store_id', $storeIds)
+            ->first();
 
         $productNameExpr = $this->productNameExpression('p');
 
@@ -365,8 +357,8 @@ class ManagerDashboardController extends Controller
                 ],
                 'loyalty' => [
                     'new_customers_today' => $newCustomersToday,
-                    'issued_today'        => round((float) ($billingAgg->loyalty_issued_today ?? 0), 2),
-                    'redeemed_today'      => round((float) ($billingAgg->loyalty_redeemed_today ?? 0), 2),
+                    'issued_today'        => (int) ($loyaltyAgg->issued_today ?? 0),
+                    'redeemed_today'      => (int) ($loyaltyAgg->redeemed_today ?? 0),
                 ],
                 'top_items'            => $topItems,
                 'cashier_performance'  => $cashierPerformance,
@@ -463,10 +455,12 @@ class ManagerDashboardController extends Controller
             ]);
         }
 
-        $customerNameExpr = $this->customerNameExpression('c');
-        $productNameExpr  = $this->productNameExpression('p');
+       $customerNameExpr      = $this->customerNameExpression('c');
+        $productNameExpr       = $this->productNameExpression('p');
+        $fulfillmentStatusExpr = $this->fulfillmentStatusExpression('b');
+        $fulfillmentTypeExpr   = $this->fulfillmentTypeExpression('b');
 
-        $recent = DB::table('billing as b')
+$recent = DB::table('billing as b')
             ->leftJoin('customers as c', 'c.customer_id', '=', 'b.customer_id')
             ->selectRaw("
                 b.billing_id,
@@ -476,21 +470,25 @@ class ManagerDashboardController extends Controller
                 b.`total`,
                 b.paid_amount,
                 b.billing_date,
-                {$customerNameExpr} AS customer_name
+                {$customerNameExpr} AS customer_name,
+                {$fulfillmentStatusExpr} AS fulfillment_status,
+                {$fulfillmentTypeExpr} AS fulfillment_type
             ")
             ->whereIntegerInRaw('b.store_id', $storeIds)
             ->whereNull('b.deleted_at')
             ->orderByDesc('b.billing_date')
             ->limit(8)
             ->get()
-            ->map(fn ($row) => [
-                'billing_id'    => (int) $row->billing_id,
-                'invnumber'     => $row->invnumber ?: "Draft #{$row->billing_id}",
-                'status'        => strtolower((string) ($row->status ?: ($row->is_draft ? 'draft' : 'unknown'))),
-                'total'         => round((float) ($row->total ?? 0), 2),
-                'paid_amount'   => round((float) ($row->paid_amount ?? 0), 2),
-                'billing_date'  => $row->billing_date,
-                'customer_name' => $row->customer_name ?: 'Walk-in customer',
+->map(fn ($row) => [
+                'billing_id'         => (int) $row->billing_id,
+                'invnumber'          => $row->invnumber ?: "Draft #{$row->billing_id}",
+                'status'             => strtolower((string) ($row->status ?: ($row->is_draft ? 'draft' : 'unknown'))),
+                'total'              => round((float) ($row->total ?? 0), 2),
+                'paid_amount'        => round((float) ($row->paid_amount ?? 0), 2),
+                'billing_date'       => $row->billing_date,
+                'customer_name'      => $row->customer_name ?: 'Walk-in customer',
+                'fulfillment_status' => $row->fulfillment_status ?: 'pending',
+                'fulfillment_type'   => $row->fulfillment_type ?: 'walk_in_counter',
             ])
             ->values();
 
@@ -559,6 +557,113 @@ class ManagerDashboardController extends Controller
             ],
         ]);
     }
+
+public function finalizeShift(Request $request): JsonResponse
+{
+    if ($error = $this->authorizePermission('page.dashboard')) {
+        return $error;
+    }
+
+    $validated = $request->validate([
+        'store_id'     => ['required', 'integer', 'exists:stores,store_id'],
+        'counted_cash' => ['nullable', 'numeric', 'min:0'],
+        'expected_cash'=> ['nullable', 'numeric', 'min:0'],
+        'variance'     => ['nullable', 'numeric'],
+    ]);
+
+    $allowedStoreIds = $this->resolveStoreIds($request);
+    $storeId = (int) $validated['store_id'];
+
+    abort_unless(
+        in_array($storeId, $allowedStoreIds, true),
+        403,
+        'You are not allowed to finalize this store.'
+    );
+
+    $today = now()->toDateString();
+    $now   = now();
+
+    $openVoids = DB::table('billing')
+        ->where('store_id', $storeId)
+        ->whereNull('deleted_at')
+        ->whereDate('billing_date', $today)
+        ->whereIn('status', ['void', 'voided', 'cancelled', 'canceled'])
+        ->count();
+
+    if ($openVoids > 0) {
+        return response()->json([
+            'message' => "Voids must be cleared before the Drawer Reconciliation can finalize a shift closure. {$openVoids} void(s) still need attention.",
+        ], 422);
+    }
+
+    $store = Store::find($storeId);
+
+    // Sales summary
+    $salesAgg = DB::table('billing')
+        ->selectRaw("
+            COUNT(CASE WHEN `status` IN ('paid','partial') AND is_draft = 0 THEN 1 END) AS total_transactions,
+            SUM(CASE WHEN `status` IN ('paid','partial') AND is_draft = 0 THEN paid_amount ELSE 0 END) AS gross_sales,
+            SUM(CASE WHEN `status` IN ('refund','refunded','returned','return') THEN `total` ELSE 0 END) AS total_refunds,
+            COUNT(CASE WHEN `status` IN ('void','voided','cancelled','canceled') THEN 1 END) AS total_voids,
+            COUNT(CASE WHEN is_draft = 1 OR `status` IN ('draft','parked') THEN 1 END) AS total_drafts
+        ")
+        ->where('store_id', $storeId)
+        ->whereNull('deleted_at')
+        ->whereDate('billing_date', $today)
+        ->first();
+
+    // Payment method breakdown
+// Payment method breakdown — from payments table (billing has no payment_method column)
+$paymentBreakdown = DB::table('payments as p')
+    ->join('billing as b', 'b.billing_id', '=', 'p.billing_id')
+    ->selectRaw("
+        COALESCE(NULLIF(TRIM(p.payment_method), ''), 'Unknown') AS method,
+        COUNT(*) AS count,
+        SUM(p.amount_received) AS amount
+    ")
+    ->where('b.store_id', $storeId)
+    ->whereNull('b.deleted_at')
+    ->whereDate('b.billing_date', $today)
+    ->whereIn('b.status', ['paid', 'partial'])
+    ->where('b.is_draft', 0)
+    ->groupBy(DB::raw("COALESCE(NULLIF(TRIM(p.payment_method), ''), 'Unknown')"))
+    ->orderByDesc('amount')
+    ->get()
+    ->map(fn($r) => [
+        'method' => $r->method,
+        'count'  => (int) $r->count,
+        'amount' => round((float) $r->amount, 2),
+    ])
+    ->values();
+
+    $grossSales    = (float) ($salesAgg->gross_sales ?? 0);
+    $totalRefunds  = (float) ($salesAgg->total_refunds ?? 0);
+    $netSales      = $grossSales - $totalRefunds;
+    $countedCash   = isset($validated['counted_cash']) ? (float) $validated['counted_cash'] : null;
+    $expectedCash  = isset($validated['expected_cash']) ? (float) $validated['expected_cash'] : $grossSales;
+    $variance      = $countedCash !== null ? $countedCash - $expectedCash : null;
+
+    return response()->json([
+        'message' => 'Shift closure finalized successfully.',
+        'z_report' => [
+            'store_name'         => $store?->store_name ?? 'Store',
+            'currency'           => $store?->currency ?? 'KES',
+            'date'               => $today,
+            'closed_at'          => $now->toISOString(),
+            'closed_at_label'    => $now->format('d M Y, H:i'),
+            'total_transactions' => (int) ($salesAgg->total_transactions ?? 0),
+            'gross_sales'        => round($grossSales, 2),
+            'total_refunds'      => round($totalRefunds, 2),
+            'net_sales'          => round($netSales, 2),
+            'total_voids'        => (int) ($salesAgg->total_voids ?? 0),
+            'total_drafts'       => (int) ($salesAgg->total_drafts ?? 0),
+            'expected_cash'      => round($expectedCash, 2),
+            'counted_cash'       => $countedCash,
+            'variance'           => $variance !== null ? round($variance, 2) : null,
+            'payment_breakdown'  => $paymentBreakdown,
+        ],
+    ]);
+}
 
     // ── Empty payload ─────────────────────────────────────────────────────
 
@@ -677,7 +782,7 @@ class ManagerDashboardController extends Controller
             'cost_total', 'total_cost', 'cost_amount',
         ]);
 
-        $qtyExpr     = $this->itemQtyExpression($billingItemAlias);
+        $qtyExpr       = $this->itemQtyExpression($billingItemAlias);
         $unitCostParts = [];
 
         $billingItemUnitCost = $this->firstExistingColumn('billing_items', [
@@ -821,4 +926,17 @@ class ManagerDashboardController extends Controller
 
         return 'COALESCE(' . implode(', ', $parts) . ')';
     }
+    private function fulfillmentStatusExpression(string $alias = 'b'): string
+{
+    return $this->hasColumn('billing', 'fulfillment_status')
+        ? "COALESCE({$alias}.fulfillment_status, 'pending')"
+        : "'pending'";
+}
+
+private function fulfillmentTypeExpression(string $alias = 'b'): string
+{
+    return $this->hasColumn('billing', 'fulfillment_type')
+        ? "COALESCE({$alias}.fulfillment_type, 'walk_in_counter')"
+        : "'walk_in_counter'";
+}
 }

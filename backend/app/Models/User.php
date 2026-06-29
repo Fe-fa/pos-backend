@@ -130,7 +130,6 @@ public function getDefaultGuardName(): string
 
     public function getSalesTodayAttribute(): float
     {
-        // If already selected from query, use it directly.
         if (array_key_exists('sales_today', $this->attributes)) {
             return round((float) $this->attributes['sales_today'], 2);
         }

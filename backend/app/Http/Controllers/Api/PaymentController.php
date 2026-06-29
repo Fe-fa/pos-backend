@@ -11,6 +11,8 @@ use Illuminate\Http\JsonResponse;
 use App\Models\Payment;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
+use App\Http\Requests\Payment\ChargeCartRequest;
+
 
 class PaymentController extends Controller
 {
@@ -32,21 +34,31 @@ public function index(Request $request): JsonResponse
             'billing.store:store_id,store_name,currency',
             'billing.user:user_id,first_name,last_name,email',
         ])
-->when($request->filled('store_id'), fn ($q) =>
-    $q->whereHas('billing', fn ($b) => $b->where('billing.store_id', $request->store_id))
-)
-->when($request->filled('status'), fn ($q) =>
-    $q->whereHas('billing', fn ($b) => $b->where('billing.status', $request->status))
-)
-->when($request->filled('payment_method'), fn ($q) =>
-    $q->where('payments.payment_method', $request->payment_method)
-)
-->when($request->filled('date_from'), fn ($q) =>
-    $q->whereDate('payments.payment_date', '>=', $request->date_from)
-)
-->when($request->filled('date_to'), fn ($q) =>
-    $q->whereDate('payments.payment_date', '<=', $request->date_to)
-)
+        ->when($request->filled('store_id'), fn ($q) =>
+            $q->whereHas('billing', fn ($b) => $b->where('billing.store_id', $request->store_id))
+        )
+        ->when($request->filled('status'), fn ($q) =>
+            $q->whereHas('billing', fn ($b) => $b->where('billing.status', $request->status))
+        )
+        ->when($request->filled('payment_method'), fn ($q) =>
+            $q->where('payments.payment_method', $request->payment_method)
+        )
+        ->when($request->filled('date_from'), fn ($q) =>
+            $q->whereDate('payments.payment_date', '>=', $request->date_from)
+        )
+        ->when($request->filled('date_to'), fn ($q) =>
+            $q->whereDate('payments.payment_date', '<=', $request->date_to)
+        )
+        // ✅ Cashier filter
+        ->when($request->filled('user_id'), fn ($q) =>
+            $q->whereHas('billing', fn ($b) => $b->where('billing.user_id', $request->user_id))
+        )
+        // ✅ Category filter
+        ->when($request->filled('category_id'), fn ($q) =>
+            $q->whereHas('billing.items.product', fn ($p) =>
+                $p->where('category_id', $request->category_id)
+            )
+        )
         ->when($search !== '', function ($q) use ($search) {
             $q->where(function ($sub) use ($search) {
                 $sub->where('receiptnumber', 'like', "%{$search}%")
@@ -142,4 +154,37 @@ public function show(Request $request, Payment $payment): JsonResponse
             ),
         ], 201);
     }
+    public function chargeCart(ChargeCartRequest $request): JsonResponse
+{
+    if ($error = $this->authorizePermission('payments.charge')) return $error;
+
+    $payload = $request->validated();
+
+    $result = $this->service->chargeCart(
+        $request->user(),
+        [
+            'store_id'        => $payload['store_id'],
+            'customer_id'     => $payload['customer_id'] ?? null,
+            'notes'           => $payload['notes'] ?? null,
+            'items'           => $payload['items'],
+
+            'payment_method'  => $payload['payment']['method'],
+            'amount_received' => (float) ($payload['payment']['amount_received']
+                ?? $payload['payment']['amount_tendered']
+                ?? 0),
+            'amount_tendered' => (float) ($payload['payment']['amount_tendered'] ?? 0),
+            'points_redeemed' => (int) ($payload['payment']['points_redeemed'] ?? 0),
+            'mpesa_phone'     => $payload['payment']['mpesa_phone'] ?? null,
+            'mpesa_code'      => $payload['payment']['mpesa_code'] ?? null,
+            'card_reference'  => $payload['payment']['card_reference'] ?? null,
+            'card_holder'     => $payload['payment']['card_holder'] ?? null,
+        ]
+    );
+
+    return response()->json([
+        'message' => 'Payment recorded successfully.',
+        'data'    => $result,
+    ], 201);
+}
+
 }

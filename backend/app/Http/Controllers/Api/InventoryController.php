@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Controllers\Concerns\AuthorizesPermission;
+use App\Http\Requests\Inventory\AdjustInventoryRequest;
 use App\Http\Requests\Inventory\StoreInventoryRequest;
 use App\Http\Requests\Inventory\UpdateInventoryRequest;
 use App\Models\Inventory;
@@ -22,7 +23,7 @@ class InventoryController extends Controller
     {
         if ($error = $this->authorizePermission('inventory.view')) return $error;
 
-        $perPage = max(1, min((int) ($request->per_page ?? 10), 100));
+        $perPage = max(1, min((int) ($request->per_page ?? 22), 100));
         $user    = $request->user();
 
         $query = Inventory::query()
@@ -37,7 +38,8 @@ class InventoryController extends Controller
             ])
             ->with([
                 'store:store_id,store_name',
-                'product:product_id,product_name,sku,category_id,image_url',
+                // ── price added so frontend can compute Total Inventory Value ──
+                'product:product_id,product_name,sku,price,category_id,image_url',
                 'product.category:category_id,category_name',
             ]);
 
@@ -89,7 +91,7 @@ class InventoryController extends Controller
     {
         if ($error = $this->authorizePermission('inventory.view')) return $error;
 
-        $perPage = max(1, min((int) ($request->per_page ?? 10), 100));
+        $perPage = max(1, min((int) ($request->per_page ?? 22), 100));
         $user    = $request->user();
 
         $query = InventoryHistory::query()
@@ -191,6 +193,16 @@ class InventoryController extends Controller
         ]);
     }
 
+    public function adjust(AdjustInventoryRequest $request, Inventory $inventoryItem): JsonResponse
+    {
+        if ($error = $this->authorizePermission('inventory.manage')) return $error;
+
+        return response()->json([
+            'message' => 'Inventory adjusted successfully.',
+            'data'    => $this->service->adjust($request->user(), $inventoryItem, $request->validated()),
+        ]);
+    }
+
     public function destroy(Request $request, Inventory $inventoryItem): JsonResponse
     {
         if ($error = $this->authorizePermission('inventory.manage')) return $error;
@@ -217,11 +229,11 @@ class InventoryController extends Controller
         return response()->json([
             'message' => 'Inventory consumed successfully using FIFO.',
             'data'    => $this->service->consumeFifo(
-                user: $request->user(),
-                storeId: (int) $data['store_id'],
+                user:      $request->user(),
+                storeId:   (int) $data['store_id'],
                 productId: (int) $data['product_id'],
-                quantity: (int) $data['quantity'],
-                reason: $data['reason'] ?? 'FIFO stock out',
+                quantity:  (int) $data['quantity'],
+                reason:    $data['reason'] ?? 'FIFO stock out',
                 reference: $data['reference'] ?? null,
             ),
         ]);

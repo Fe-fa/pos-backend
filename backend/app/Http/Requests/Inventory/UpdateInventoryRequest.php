@@ -17,7 +17,7 @@ class UpdateInventoryRequest extends FormRequest
             'store_id'      => ['sometimes', 'required', 'exists:stores,store_id'],
             'product_id'    => ['sometimes', 'required', 'exists:products,product_id'],
             'batch_no'      => ['nullable', 'string', 'max:100'],
-            'quantity'      => ['required', 'integer', 'min:0'],
+            'quantity'      => ['sometimes', 'required', 'integer', 'min:1'], // 'sometimes' — edit mode omits it entirely
             'reorder_level' => ['nullable', 'integer', 'min:0'],
         ];
     }

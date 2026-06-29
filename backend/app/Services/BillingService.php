@@ -45,49 +45,70 @@ class BillingService
             ->where('user_id', $user->user_id);
     }
 
-    public function applyListFilters(Builder $query, array $filters): Builder
-    {
-        // Store filter
-        if (!empty($filters['store_id'])) {
-            $query->where('store_id', (int) $filters['store_id']);
-        }
-
-        // Customer filter — used by balance-settlement flow
-        if (!empty($filters['customer_id'])) {
-            $query->where('customer_id', (int) $filters['customer_id']);
-        }
-
-        // Status — supports single value or comma-separated: "unpaid,partial"
-        if (!empty($filters['status'])) {
-            $statuses = array_filter(array_map('trim', explode(',', $filters['status'])));
-            count($statuses) === 1
-                ? $query->where('status', $statuses[0])
-                : $query->whereIn('status', $statuses);
-        }
-
-        // Draft flag
-        if (isset($filters['is_draft']) && $filters['is_draft'] !== '') {
-            $query->where('is_draft', filter_var($filters['is_draft'], FILTER_VALIDATE_BOOLEAN));
-        }
-
-        // Fulfillment filters
-        if (!empty($filters['fulfillment_status'])) {
-            $query->where('fulfillment_status', $filters['fulfillment_status']);
-        }
-
-        if (!empty($filters['fulfillment_type'])) {
-            $query->where('fulfillment_type', $filters['fulfillment_type']);
-        }
-
-        // Soft-delete scope
-        if (!empty($filters['only_trashed'])) {
-            $query->onlyTrashed();
-        } elseif (!empty($filters['with_trashed'])) {
-            $query->withTrashed();
-        }
-
-        return $query;
+public function applyListFilters(Builder $query, array $filters): Builder
+{
+    // Store filter
+    if (!empty($filters['store_id'])) {
+        $query->where('store_id', (int) $filters['store_id']);
     }
+
+    // Customer filter
+    if (!empty($filters['customer_id'])) {
+        $query->where('customer_id', (int) $filters['customer_id']);
+    }
+
+    // ✅ Cashier / operator filter
+    if (!empty($filters['user_id'])) {
+        $query->where('user_id', (int) $filters['user_id']);
+    }
+
+    // ✅ Payment method filter
+    if (!empty($filters['payment_method'])) {
+        $query->whereHas('payments', function (Builder $q) use ($filters) {
+            $q->where('payment_method', $filters['payment_method']);
+        });
+    }
+
+    // ✅ Date range filters
+    if (!empty($filters['date_from'])) {
+        $query->whereDate('billing_date', '>=', $filters['date_from']);
+    }
+
+    if (!empty($filters['date_to'])) {
+        $query->whereDate('billing_date', '<=', $filters['date_to']);
+    }
+
+    // Status
+    if (!empty($filters['status'])) {
+        $statuses = array_filter(array_map('trim', explode(',', $filters['status'])));
+        count($statuses) === 1
+            ? $query->where('status', $statuses[0])
+            : $query->whereIn('status', $statuses);
+    }
+
+    // Draft flag
+    if (isset($filters['is_draft']) && $filters['is_draft'] !== '') {
+        $query->where('is_draft', filter_var($filters['is_draft'], FILTER_VALIDATE_BOOLEAN));
+    }
+
+    // Fulfillment filters
+    if (!empty($filters['fulfillment_status'])) {
+        $query->where('fulfillment_status', $filters['fulfillment_status']);
+    }
+
+    if (!empty($filters['fulfillment_type'])) {
+        $query->where('fulfillment_type', $filters['fulfillment_type']);
+    }
+
+    // Soft-delete scope
+    if (!empty($filters['only_trashed'])) {
+        $query->onlyTrashed();
+    } elseif (!empty($filters['with_trashed'])) {
+        $query->withTrashed();
+    }
+
+    return $query;
+}
 
     public function authorizeStoreAccess(User $user, int|string|null $storeId): void
     {
@@ -234,7 +255,7 @@ class BillingService
 
     public function recalculateTotals(Billing $billing): Billing
     {
-        $billing->load('items');
+       $billing->load(['items' => fn($q) => $q->whereNull('deleted_at')]);
 
         $subtotal       = (float) $billing->items->sum('line_subtotal');
         $vatAmount      = (float) $billing->items->sum('vat_amount');
@@ -271,7 +292,7 @@ class BillingService
             }
 
             $billing = $this->recalculateTotals($billing);
-            $billing->load(['items.product', 'payments']);
+            $billing->load(['items' => fn($q) => $q->whereNull('deleted_at'), 'items.product', 'payments']);
 
             if ($billing->items->isEmpty()) {
                 throw new HttpResponseException(

@@ -74,6 +74,10 @@ class BillingController extends Controller
             'is_draft',
             'fulfillment_status',
             'fulfillment_type',
+            'user_id',         
+            'payment_method',   
+            'date_from',       
+            'date_to', 
         ]));
 
         $billings = $query->orderByDesc('billing_id')->paginate($perPage);

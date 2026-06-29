@@ -39,4 +39,5 @@ class Payment extends Model
     {
         return $this->belongsTo(Billing::class, 'billing_id', 'billing_id');
     }
+    
 }
