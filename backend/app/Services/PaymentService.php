@@ -364,19 +364,19 @@ $freshCustomerBalance = round((float) Billing::where('customer_id', $customerId)
             $unitPrice = round((float) $item['price'], 2);
             $vatRate = (float) ($item['vat_rate'] ?? 16);
 
-            $totalAmount = round($qty * $unitPrice, 2);
-            $lineSubtotal = round($totalAmount / (1 + ($vatRate / 100)), 2);
-            $vatAmount = round($totalAmount - $lineSubtotal, 2);
+$totalAmount = $qty * $unitPrice;
+$lineSubtotal = $totalAmount / (1 + ($vatRate / 100));
+$vatAmount = $totalAmount - $lineSubtotal;
 
-            $billing->items()->create([
-                'product_id'    => (int) $item['product_id'],
-                'quantity'      => $qty,
-                'unit_price'    => $unitPrice,
-                'vat_rate'      => $vatRate,
-                'line_subtotal' => $lineSubtotal,
-                'vat_amount'    => $vatAmount,
-                'total_amount'  => $totalAmount,
-            ]);
+$billing->items()->create([
+    'product_id'    => (int) $item['product_id'],
+    'quantity'      => $qty,
+    'unit_price'    => $unitPrice,
+    'vat_rate'      => $vatRate,
+    'line_subtotal' => round($lineSubtotal, 2),
+    'vat_amount'    => round($vatAmount, 2),
+    'total_amount'  => round($totalAmount, 2),
+]);
         }
 
         $billing = $this->billingService->recalculateTotals($billing->fresh());

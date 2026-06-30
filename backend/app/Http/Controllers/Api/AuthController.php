@@ -30,13 +30,11 @@ public function login(LoginRequest $request): JsonResponse
 {
     $result = $this->authService->login($request->validated());
 
-    // Block login if email not verified
     if (! $result['user']['email_verified']) {
-        // Issue a short-lived token only for verification use
         return response()->json([
             'message'              => 'Email not verified.',
             'requires_verification'=> true,
-            'access_token'         => $result['access_token'], // needed to call /verify-email
+            'access_token'         => $result['access_token'],
             'token_type'           => $result['token_type'],
             'user'                 => $result['user'],
         ], 403);

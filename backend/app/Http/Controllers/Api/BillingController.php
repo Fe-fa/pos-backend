@@ -55,7 +55,7 @@ class BillingController extends Controller
                 'customer:customer_id,full_name,email,phone',
                 'store:store_id,store_name',
                 'user:user_id,first_name,last_name,email',
-                'payments:payment_id,billing_id,amount_received,payment_method,payment_date',
+                'payments:payment_id,billing_id,amount_received,payment_method,payment_date,receiptnumber',
             ])
             ->withCount('items')
             ->withSum('items', 'quantity');
@@ -66,7 +66,17 @@ class BillingController extends Controller
             $query->withTrashed();
         }
 
-        $query = $this->service->scopeAccessible($query, $user);
+        // $query = $this->service->scopeAccessible($query, $user);
+        $isSearchRequest = $request->filled('invnumber') || $request->filled('search');
+
+if ($isSearchRequest) {
+    // Only restrict to stores the user has access to, not to their own records
+    $allowedStoreIds = $this->service->allowedStoreIds($user);
+    $query->whereIn('store_id', $allowedStoreIds);
+} else {
+    $query = $this->service->scopeAccessible($query, $user);
+}
+
         $query = $this->service->applyListFilters($query, $request->only([
             'store_id',
             'customer_id',
@@ -78,6 +88,8 @@ class BillingController extends Controller
             'payment_method',   
             'date_from',       
             'date_to', 
+            'invnumber',  
+            'search',
         ]));
 
         $billings = $query->orderByDesc('billing_id')->paginate($perPage);

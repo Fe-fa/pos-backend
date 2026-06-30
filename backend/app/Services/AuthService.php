@@ -106,7 +106,7 @@ public function resendVerificationCode(User $user): void
 
         $deviceName = $credentials['device_name'] ?? request()->userAgent() ?? 'api-device';
 
- $expiresAt = config('sanctum.expiration')
+$expiresAt = config('sanctum.expiration')
     ? now()->addMinutes((int) config('sanctum.expiration'))
     : null;
 
@@ -118,8 +118,8 @@ public function resendVerificationCode(User $user): void
             'token_type' => 'Bearer',
             'access_token' => $token->plainTextToken,
             'expires_at' => $expiresAt?->toDateTimeString(),
-            'refresh_expires_at' => now()
-                ->addMinutes(config('sanctum.refresh_expiration', config('sanctum.expiration', 0)))
+                'refresh_expires_at' => now()
+    ->addMinutes((int) config('sanctum.refresh_expiration', config('sanctum.expiration', 0)))
                 ->toDateTimeString(),
             'session_id' => $session->id,
             'user' => $this->profile($user),
@@ -173,8 +173,8 @@ public function resendVerificationCode(User $user): void
             'access_token' => $newToken->plainTextToken,
             'expires_at' => $expiresAt?->toDateTimeString(),
             'refresh_expires_at' => now()
-                ->addMinutes(config('sanctum.refresh_expiration', config('sanctum.expiration', 0)))
-                ->toDateTimeString(),
+    ->addMinutes((int) config('sanctum.refresh_expiration', config('sanctum.expiration', 0)))
+    ->toDateTimeString(),
             'user' => $this->profile($user),
         ];
     }
@@ -306,7 +306,7 @@ public function profile(User $user): array
                 'last_activity' => $session->last_activity_at->toDateTimeString(),
                 'expires_at'    => $session->last_activity_at
                     ->copy()
-                    ->addMinutes(config('sanctum.session_lifetime', 10080))
+                    ->addMinutes((int) config('sanctum.session_lifetime', 10080))
                     ->toDateTimeString(),
                 'is_current'    => $session->is_current,
             ])

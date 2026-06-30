@@ -17,20 +17,37 @@ class StoreUserRequest extends FormRequest
     {
         return [
             'first_name' => ['required', 'string', 'max:255'],
-            'last_name' => ['required', 'string', 'max:255'],
-            'username' => ['required', 'string', 'max:255', 'unique:users,username'],
-            'email' => ['required', 'email', 'max:255', 'unique:users,email'],
-            'phone' => ['nullable', 'string', 'max:50'],
-            'password' => ['required', 'string', 'min:8', 'confirmed'],
-            'role' => ['required', Rule::in([User::ROLE_ADMIN, User::ROLE_MANAGER, User::ROLE_CASHIER])],
-            'default_store_id' => ['nullable', 'integer', 'exists:stores,store_id'],
-            'is_active' => ['nullable', 'boolean'],
-            'store_ids' => ['nullable', 'array'],
-            'store_ids.*' => ['integer', 'exists:stores,store_id'],
+            'last_name'  => ['required', 'string', 'max:255'],
+            'username'   => ['required', 'string', 'max:255', 'unique:users,username'],
+            'email'      => ['required', 'email', 'max:255', 'unique:users,email'],
 
-            'shift_name' => ['nullable', 'string', 'max:100'],
+            // Phone unique across all users
+            'phone' => [
+                'nullable',
+                'string',
+                'max:50',
+                'regex:/^\+?[0-9]{10,15}$/',
+                'unique:users,phone',
+            ],
+
+            'password'         => ['required', 'string', 'min:8', 'confirmed'],
+            'role'             => ['required', Rule::in([User::ROLE_ADMIN, User::ROLE_MANAGER, User::ROLE_CASHIER])],
+            'default_store_id' => ['nullable', 'integer', 'exists:stores,store_id'],
+            'is_active'        => ['nullable', 'boolean'],
+            'store_ids'        => ['nullable', 'array'],
+            'store_ids.*'      => ['integer', 'exists:stores,store_id'],
+
+            'shift_name'  => ['nullable', 'string', 'max:100'],
             'shift_start' => ['nullable', 'date_format:H:i', 'required_with:shift_name,shift_end'],
-            'shift_end' => ['nullable', 'date_format:H:i', 'required_with:shift_name,shift_start', 'after:shift_start'],
+            'shift_end'   => ['nullable', 'date_format:H:i', 'required_with:shift_name,shift_start', 'after:shift_start'],
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'phone.unique' => 'This phone number is already registered.',
+            'phone.regex'  => 'Please enter a valid phone number (10–15 digits, optional leading +).',
         ];
     }
 }

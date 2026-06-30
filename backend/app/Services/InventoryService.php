@@ -21,6 +21,7 @@ class InventoryService
             ->orderBy('created_at')
             ->orderBy('inventory_id');
 
+        // Store Isolation / ACL Enforcement
         if (!$user->isAdmin() && !$user->can('stores.manage')) {
             $storeIds = $user->stores()->pluck('stores.store_id')
                 ->push($user->default_store_id)
@@ -34,6 +35,18 @@ class InventoryService
             $query->where('store_id', $filters['store_id']);
         }
 
+        // --- NEW: REORDER LEVEL FILTERS ---
+        if (!empty($filters['stock_status'])) {
+            if ($filters['stock_status'] === 'below') {
+                // Low Stock Threshold Warning (Current Quantity falls at or below Reorder Level)
+                $query->whereColumn('quantity', '<=', 'reorder_level');
+            } elseif ($filters['stock_status'] === 'above') {
+                // Healthy Stock Levels
+                $query->whereColumn('quantity', '>', 'reorder_level');
+            }
+        }
+
+        // Global Search
         if (!empty($filters['search'])) {
             $search = trim($filters['search']);
 
@@ -148,13 +161,6 @@ class InventoryService
         });
     }
 
-    /**
-     * Handles both "edit" (no quantity) and "restock" (quantity > 0) modes.
-     *
-     * - Edit mode:    quantity key is absent → only batch_no + reorder_level update, qty unchanged.
-     * - Restock mode: quantity key is present → validated >= 1 by UpdateInventoryRequest,
-     *                 accumulated on top of existing qty, history logged as stock_in.
-     */
     public function update(User $user, Inventory $inventory, array $data): Inventory
     {
         return DB::transaction(function () use ($user, $inventory, $data) {
@@ -177,12 +183,10 @@ class InventoryService
 
             $oldQty = (int) $inventory->quantity;
 
-            // quantity is only present for restock; absent for edit
             $hasQty = array_key_exists('quantity', $data) && $data['quantity'] !== null;
             $addQty = $hasQty ? (int) $data['quantity'] : null;
 
             if ($hasQty) {
-                // restock — accumulate
                 if ($addQty <= 0) {
                     abort(response()->json([
                         'message' => 'Quantity to add must be greater than zero.',
@@ -190,7 +194,6 @@ class InventoryService
                 }
                 $newQty = $oldQty + $addQty;
             } else {
-                // edit — keep existing quantity unchanged
                 $newQty = $oldQty;
             }
 
@@ -204,7 +207,6 @@ class InventoryService
                 'reorder_level' => $data['reorder_level'] ?? $inventory->reorder_level,
             ]);
 
-            // Only log history when stock actually changed
             if ($hasQty && $addQty > 0) {
                 $this->logHistory(
                     inventory:       $inventory,
@@ -233,11 +235,6 @@ class InventoryService
         });
     }
 
-    /**
-     * Quick Adjust: apply a signed delta (+/-) to an existing FIFO layer.
-     * Positive = add stock, negative = remove stock (shrinkage, damage, correction).
-     * Result quantity cannot go below zero.
-     */
     public function adjust(User $user, Inventory $inventory, array $data): Inventory
     {
         return DB::transaction(function () use ($user, $inventory, $data) {

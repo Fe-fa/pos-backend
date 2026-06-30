@@ -38,7 +38,6 @@ class InventoryController extends Controller
             ])
             ->with([
                 'store:store_id,store_name',
-                // ── price added so frontend can compute Total Inventory Value ──
                 'product:product_id,product_name,sku,price,category_id,image_url',
                 'product.category:category_id,category_name',
             ]);
@@ -134,7 +133,9 @@ class InventoryController extends Controller
             )
             ->when($request->change_type, fn($q, $changeType) =>
                 $q->where('change_type', $changeType)
+
             )
+            
             ->when($request->search, function ($q, $search) {
                 $search = trim($search);
                 $q->where(function ($sub) use ($search) {

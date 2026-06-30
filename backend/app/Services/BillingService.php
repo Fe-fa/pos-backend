@@ -106,6 +106,31 @@ public function applyListFilters(Builder $query, array $filters): Builder
     } elseif (!empty($filters['with_trashed'])) {
         $query->withTrashed();
     }
+if (!empty($filters['invnumber'])) {
+    $term = $filters['invnumber'];
+    $query->where(function (Builder $q) use ($term) {
+        // Match invoice number OR receipt number on any payment
+        $q->where('invnumber', $term)
+          ->orWhereHas('payments', function (Builder $p) use ($term) {
+              $p->where('receiptnumber', $term);
+          });
+    });
+}
+
+if (!empty($filters['search'])) {
+    $term = $filters['search'];
+    $query->where(function (Builder $q) use ($term) {
+        // Match invoice number, receipt number, customer phone or customer name
+        $q->where('invnumber', $term)
+          ->orWhereHas('payments', function (Builder $p) use ($term) {
+              $p->where('receiptnumber', $term);
+          })
+          ->orWhereHas('customer', function (Builder $c) use ($term) {
+              $c->where('phone', $term)
+                ->orWhere('full_name', $term);
+          });
+    });
+}
 
     return $query;
 }
@@ -127,44 +152,53 @@ public function applyListFilters(Builder $query, array $filters): Builder
         }
     }
 
-    public function authorizeBillingAccess(Billing $billing, ?User $actor = null): void
-    {
-        $actor = $actor ?: auth()->user();
+public function authorizeBillingAccess(Billing $billing, ?User $actor = null, bool $viewOnly = false): void
+{
+    $actor = $actor ?: auth()->user();
 
-        if (!$actor) {
-            throw new HttpResponseException(
-                response()->json(['message' => 'Unauthenticated.'], 401)
-            );
-        }
-
-        if ($actor->isAdmin()) {
-            return;
-        }
-
-        $storeIds = $this->allowedStoreIds($actor)->all();
-        $hasStoreAccess = in_array((int) $billing->store_id, $storeIds, true);
-
-        if ($actor->isManager()) {
-            if (!$hasStoreAccess) {
-                throw new HttpResponseException(
-                    response()->json([
-                        'message' => 'You are not allowed to access this billing.',
-                    ], 403)
-                );
-            }
-            return;
-        }
-
-        $ownsBilling = (string) $billing->user_id === (string) $actor->user_id;
-
-        if (!$hasStoreAccess || !$ownsBilling) {
-            throw new HttpResponseException(
-                response()->json([
-                    'message' => 'You are not allowed to access this billing.',
-                ], 403)
-            );
-        }
+    if (!$actor) {
+        throw new HttpResponseException(
+            response()->json(['message' => 'Unauthenticated.'], 401)
+        );
     }
+
+    if ($actor->isAdmin()) {
+        return;
+    }
+
+    $storeIds = $this->allowedStoreIds($actor)->all();
+    $hasStoreAccess = in_array((int) $billing->store_id, $storeIds, true);
+
+    if ($actor->isManager()) {
+        if (!$hasStoreAccess) {
+            throw new HttpResponseException(
+                response()->json(['message' => 'You are not allowed to access this billing.'], 403)
+            );
+        }
+        return;
+    }
+
+    // Cashier — must have store access
+    if (!$hasStoreAccess) {
+        throw new HttpResponseException(
+            response()->json(['message' => 'You are not allowed to access this billing.'], 403)
+        );
+    }
+
+    // View-only (reprint) — store access is enough, no ownership check
+    if ($viewOnly) {
+        return;
+    }
+
+    // Manage actions — cashier must own the billing
+    $ownsBilling = (string) $billing->user_id === (string) $actor->user_id;
+
+    if (!$ownsBilling) {
+        throw new HttpResponseException(
+            response()->json(['message' => 'You are not allowed to access this billing.'], 403)
+        );
+    }
+}
 
     public function createDraft(User $user, array $data): Billing
     {
@@ -202,7 +236,7 @@ public function applyListFilters(Builder $query, array $filters): Builder
 
     public function show(Billing $billing): Billing
     {
-        $this->authorizeBillingAccess($billing);
+        $this->authorizeBillingAccess($billing, viewOnly: true);
 
         $billing->load(['customer', 'store', 'user', 'items.product.category', 'payments']);
         $billing->loadCount('items');
@@ -324,6 +358,7 @@ public function applyListFilters(Builder $query, array $filters): Builder
                 'invnumber'        => $invoiceNumber,
                 'stock_applied_at' => now(),
             ]);
+            
 
             $this->auditLogService->log(
                 'billing.finalize',

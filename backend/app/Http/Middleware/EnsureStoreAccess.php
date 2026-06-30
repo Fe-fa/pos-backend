@@ -44,6 +44,7 @@ class EnsureStoreAccess
         $candidates = [
             $request->route('store_id'),
             $request->route('store'),
+            $request->route('product'), 
             $request->input('store_id'),
             $request->header('X-Store-Id'),
         ];

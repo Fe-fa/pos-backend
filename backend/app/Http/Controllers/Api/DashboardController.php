@@ -241,6 +241,24 @@ class DashboardController extends Controller
             })
             ->count();
 
+            $lowStockRows = DB::table('inventory')
+    ->join('products', 'inventory.product_id', '=', 'products.product_id')
+    ->select([
+        'inventory.inventory_id',
+        'inventory.store_id',
+        'inventory.product_id',
+        'inventory.quantity',
+        'inventory.reorder_level',
+        'products.product_name',
+    ])
+    ->whereIntegerInRaw('inventory.store_id', $storeIds)
+    ->whereColumn('inventory.quantity', '<=', 'inventory.reorder_level')
+    ->orderBy('inventory.quantity')
+    ->limit(5)
+    ->get()
+    ->map(fn ($r) => (array) $r)
+    ->all();
+
         $currency = $activeTenants->first()?->currency
             ?? $stores->first()?->currency
             ?? 'KES';
@@ -290,6 +308,7 @@ class DashboardController extends Controller
                     'health_pct'      => round($inventoryHealth, 2),
                 ],
                 'store_performance' => $storePerformance,
+                'low_stock_rows'    => $lowStockRows,  
             ],
             'trends' => [
                 'last_7_days' => $last7Days,
@@ -554,6 +573,7 @@ class DashboardController extends Controller
                     'low_stock_count' => 0, 'health_pct' => 0,
                 ],
                 'store_performance' => [],
+                'low_stock_rows'    => [], 
             ],
             'trends' => ['last_7_days' => []],
         ];
