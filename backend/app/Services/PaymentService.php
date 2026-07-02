@@ -15,6 +15,7 @@ class PaymentService
         private readonly DocumentNumberService $documentNumberService,
         private readonly AuditLogService       $auditLogService,
         private readonly LoyaltyService        $loyaltyService,
+        private readonly CashierShiftService    $cashierShiftService,
     ) {
     }
 
@@ -37,6 +38,8 @@ class PaymentService
                     'message' => 'This billing has already been fully paid.',
                 ], 422));
             }
+
+            $this->cashierShiftService->requireOpenShift($user, (int) $billing->store_id);
 
             // Finalize billing once only
             $billing = $this->billingService->finalizeIfNeeded($billing, $user);
@@ -339,6 +342,7 @@ $freshCustomerBalance = round((float) Billing::where('customer_id', $customerId)
     public function chargeCart(User $user, array $data): array
 {
     $this->billingService->authorizeStoreAccess($user, $data['store_id']);
+    $this->cashierShiftService->requireOpenShift($user, (int) $data['store_id']);
 
     return DB::transaction(function () use ($user, $data) {
         $billing = Billing::create([

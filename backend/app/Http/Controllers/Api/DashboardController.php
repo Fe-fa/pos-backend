@@ -9,6 +9,7 @@ use App\Models\Customer;
 use App\Models\Product;
 use App\Models\Store;
 use App\Models\User;
+use App\Services\CashierShiftService;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
 use Illuminate\Http\JsonResponse;
@@ -18,6 +19,10 @@ use Illuminate\Support\Facades\DB;
 class DashboardController extends Controller
 {
     use AuthorizesPermission;
+
+    public function __construct(private readonly CashierShiftService $cashierShiftService)
+    {
+    }
 
     private function resolveStoreIds(Request $request): array
     {
@@ -134,6 +139,8 @@ class DashboardController extends Controller
             ->whereIntegerInRaw('store_id', $storeIds)
             ->where('current_balance', '>', 0)
             ->sum('current_balance');
+
+        $cashShiftSummary = $this->cashierShiftService->buildScopedDailySummary($storeIds, $today);
 
         $last7Raw = DB::table('billing')
             ->select([
@@ -284,6 +291,10 @@ class DashboardController extends Controller
                     'voids'        => $todayVoids,
                     'outstanding'  => round($customerOutstanding, 2),
                     'new_tenants'  => $newTenantsToday,
+                    'opening_balance' => round((float) ($cashShiftSummary['total_opening_balance'] ?? 0), 2),
+                    'cash_sales' => round((float) ($cashShiftSummary['total_cash_sales'] ?? 0), 2),
+                    'non_cash_sales' => round((float) ($cashShiftSummary['total_non_cash_sales'] ?? 0), 2),
+                    'expected_drawer_cash' => round((float) ($cashShiftSummary['total_expected_cash'] ?? 0), 2),
                 ],
                 'stats' => [
                     'gross_billed'             => round($grossBilled, 2),
@@ -309,6 +320,7 @@ class DashboardController extends Controller
                 ],
                 'store_performance' => $storePerformance,
                 'low_stock_rows'    => $lowStockRows,  
+                'daily_cashier_summary' => $cashShiftSummary['rows'] ?? [],
             ],
             'trends' => [
                 'last_7_days' => $last7Days,
@@ -560,6 +572,7 @@ class DashboardController extends Controller
                 'today' => [
                     'collected' => 0, 'orders' => 0, 'refund_value' => 0,
                     'refund_count' => 0, 'voids' => 0, 'outstanding' => 0, 'new_tenants' => 0,
+                    'opening_balance' => 0, 'cash_sales' => 0, 'non_cash_sales' => 0, 'expected_drawer_cash' => 0,
                 ],
                 'stats' => [
                     'gross_billed' => 0, 'paid_collections' => 0, 'outstanding_total' => 0,
@@ -574,6 +587,7 @@ class DashboardController extends Controller
                 ],
                 'store_performance' => [],
                 'low_stock_rows'    => [], 
+                'daily_cashier_summary' => [],
             ],
             'trends' => ['last_7_days' => []],
         ];

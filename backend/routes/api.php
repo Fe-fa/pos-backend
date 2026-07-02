@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BillingController;
 use App\Http\Controllers\Api\BillingItemController;
+use App\Http\Controllers\Api\GrnController;
 use App\Http\Controllers\Api\CategoryController;
 use App\Http\Controllers\Api\CustomerController;
 use App\Http\Controllers\Api\InventoryController;
@@ -19,6 +20,9 @@ use App\Http\Controllers\Api\SuperAdminDashboardController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\ManagerDashboardController;
 use App\Http\Controllers\Api\PosSessionController;
+use App\Http\Controllers\Api\CashierShiftController;
+use App\Http\Controllers\Api\SupplierController;
+
 
 
 Route::prefix('auth')->group(function () {
@@ -41,6 +45,28 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/sessions/{sessionId}', [AuthController::class, 'revokeSession'])->name('auth.sessions.destroy');
 
     });
+     Route::get('/cashier-shifts/today', [CashierShiftController::class, 'today']);
+    Route::post('/cashier-shifts/open', [CashierShiftController::class, 'open']);
+    Route::post('/cashier-shifts/close', [CashierShiftController::class, 'close']);
+    Route::get('/cashier-shifts/daily-sales', [CashierShiftController::class, 'dailySales']);
+
+    // Manager / Admin endpoints
+    Route::get('/cashier-shifts/all-cashiers', [CashierShiftController::class, 'allCashiers']);
+    Route::get('/cashier-shifts/report', [CashierShiftController::class, 'report']);
+
+    Route::get('/grns', [GrnController::class, 'index']);
+    Route::post('/grns', [GrnController::class, 'store']);
+    Route::get('/grns/{grn}', [GrnController::class, 'show']);
+    Route::put('/grns/{grn}', [GrnController::class, 'update']);
+    Route::delete('/grns/{grn}', [GrnController::class, 'destroy']);
+
+    Route::post('/grns/{grn}/items', [GrnController::class, 'addItem']);
+    Route::put('/grns/{grn}/items/{grnItem}', [GrnController::class, 'updateItem']);
+    Route::delete('/grns/{grn}/items/{grnItem}', [GrnController::class, 'deleteItem']);
+    Route::post('/grns/{grn}/complete', [GrnController::class, 'complete']);
+    Route::post('/grns/{grn}/charge', [GrnController::class, 'charge']);
+
+    
 
 Route::prefix('access-control')->group(function () {
     Route::get('/', [AccessControlController::class, 'index']);
@@ -65,6 +91,8 @@ Route::prefix('access-control')->group(function () {
 
     Route::apiResource('categories', CategoryController::class);
     Route::apiResource('products', ProductController::class);
+    Route::apiResource('suppliers', SupplierController::class);
+
 
     Route::get('inventory/history', [InventoryController::class, 'history'])->name('inventory.history');
     Route::post('inventory/consume-fifo', [InventoryController::class, 'consumeFifo'])->name('inventory.consume-fifo');

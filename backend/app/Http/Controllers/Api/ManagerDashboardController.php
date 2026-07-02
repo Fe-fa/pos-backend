@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Controllers\Concerns\AuthorizesPermission;
 use App\Models\Store;
+use App\Services\CashierShiftService;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
 use Illuminate\Http\JsonResponse;
@@ -15,6 +16,10 @@ use Illuminate\Support\Facades\Schema;
 class ManagerDashboardController extends Controller
 {
     use AuthorizesPermission;
+
+    public function __construct(private readonly CashierShiftService $cashierShiftService)
+    {
+    }
 
     private array $columnExistsCache = [];
 
@@ -66,7 +71,7 @@ class ManagerDashboardController extends Controller
 
     public function summary(Request $request): JsonResponse
     {
-        if ($error = $this->authorizePermission('page.dashboard')) return $error;
+        if ($error = $this->authorizePermission('page.manager_dashboard')) return $error;
 
         $storeIds = $this->resolveStoreIds($request);
 
@@ -310,6 +315,8 @@ $stores = Store::query()
         $todayTransactions = (int) ($billingAgg->today_transactions ?? 0);
         $avgTicket         = $todayTransactions > 0 ? $todaySales / $todayTransactions : 0.0;
 
+        $cashShiftSummary = $this->cashierShiftService->buildScopedDailySummary($storeIds, $today);
+
         $lowStockCount     = (int) ($inventoryAgg->low_stock_count ?? 0);
         $outOfStockCount   = (int) ($inventoryAgg->out_of_stock_count ?? 0);
         $totalRows         = (int) ($inventoryAgg->total_rows ?? 0);
@@ -341,6 +348,12 @@ $stores = Store::query()
                     'avg_ticket'        => round($avgTicket, 2),
                     'pending_orders'    => (int) ($billingAgg->pending_orders_count ?? 0),
                     'unique_customers'  => (int) ($billingAgg->unique_customers_today ?? 0),
+                    'opening_balance'   => round((float) ($cashShiftSummary['total_opening_balance'] ?? 0), 2),
+                    'cash_sales'        => round((float) ($cashShiftSummary['total_cash_sales'] ?? 0), 2),
+                    'non_cash_sales'    => round((float) ($cashShiftSummary['total_non_cash_sales'] ?? 0), 2),
+                    'expected_drawer_cash' => round((float) ($cashShiftSummary['total_expected_cash'] ?? 0), 2),
+                    'open_cashier_shifts' => (int) ($cashShiftSummary['open_shift_count'] ?? 0),
+                    'closed_cashier_shifts' => (int) ($cashShiftSummary['closed_shift_count'] ?? 0),
                 ],
                 'stats' => [
                     'inventory_health_pct'    => round($inventoryHealth, 2),
@@ -363,6 +376,7 @@ $stores = Store::query()
                 'top_items'            => $topItems,
                 'cashier_performance'  => $cashierPerformance,
                 'register_performance' => $registerPerformance,
+                'daily_cashier_summary' => $cashShiftSummary['rows'] ?? [],
             ],
         ]);
     }
@@ -565,10 +579,10 @@ public function finalizeShift(Request $request): JsonResponse
     }
 
     $validated = $request->validate([
-        'store_id'     => ['required', 'integer', 'exists:stores,store_id'],
-        'counted_cash' => ['nullable', 'numeric', 'min:0'],
-        'expected_cash'=> ['nullable', 'numeric', 'min:0'],
-        'variance'     => ['nullable', 'numeric'],
+        'store_id'      => ['required', 'integer', 'exists:stores,store_id'],
+        'counted_cash'  => ['nullable', 'numeric', 'min:0'],
+        'expected_cash' => ['nullable', 'numeric', 'min:0'],
+        'variance'      => ['nullable', 'numeric'],
     ]);
 
     $allowedStoreIds = $this->resolveStoreIds($request);
@@ -598,7 +612,6 @@ public function finalizeShift(Request $request): JsonResponse
 
     $store = Store::find($storeId);
 
-    // Sales summary
     $salesAgg = DB::table('billing')
         ->selectRaw("
             COUNT(CASE WHEN `status` IN ('paid','partial') AND is_draft = 0 THEN 1 END) AS total_transactions,
@@ -612,36 +625,63 @@ public function finalizeShift(Request $request): JsonResponse
         ->whereDate('billing_date', $today)
         ->first();
 
-    // Payment method breakdown
-// Payment method breakdown — from payments table (billing has no payment_method column)
-$paymentBreakdown = DB::table('payments as p')
-    ->join('billing as b', 'b.billing_id', '=', 'p.billing_id')
+    $paymentBreakdown = DB::table('payments as p')
+        ->join('billing as b', 'b.billing_id', '=', 'p.billing_id')
+        ->selectRaw("
+            COALESCE(NULLIF(TRIM(p.payment_method), ''), 'Unknown') AS method,
+            COUNT(*) AS count,
+            SUM(p.amount_received) AS amount
+        ")
+        ->where('b.store_id', $storeId)
+        ->whereNull('b.deleted_at')
+        ->whereDate('b.billing_date', $today)
+        ->whereIn('b.status', ['paid', 'partial'])
+        ->where('b.is_draft', 0)
+        ->groupBy(DB::raw("COALESCE(NULLIF(TRIM(p.payment_method), ''), 'Unknown')"))
+        ->orderByDesc('amount')
+        ->get()
+        ->map(fn($r) => [
+            'method' => $r->method,
+            'count'  => (int) $r->count,
+            'amount' => round((float) $r->amount, 2),
+        ])
+        ->values();
+
+$productsSold = DB::table('billing_items as bi')
+    ->join('billing as b', 'b.billing_id', '=', 'bi.billing_id')
+    ->leftJoin('products as p', 'p.product_id', '=', 'bi.product_id')
     ->selectRaw("
-        COALESCE(NULLIF(TRIM(p.payment_method), ''), 'Unknown') AS method,
-        COUNT(*) AS count,
-        SUM(p.amount_received) AS amount
+        bi.product_id,
+        COALESCE(NULLIF(TRIM(p.product_name), ''), CONCAT('Product #', bi.product_id)) AS product_name,
+        SUM(COALESCE(bi.quantity, 0)) AS qty,
+        SUM(COALESCE(bi.total_amount, COALESCE(bi.quantity, 0) * COALESCE(bi.unit_price, 0))) AS amount
     ")
     ->where('b.store_id', $storeId)
     ->whereNull('b.deleted_at')
     ->whereDate('b.billing_date', $today)
     ->whereIn('b.status', ['paid', 'partial'])
     ->where('b.is_draft', 0)
-    ->groupBy(DB::raw("COALESCE(NULLIF(TRIM(p.payment_method), ''), 'Unknown')"))
+    ->groupBy('bi.product_id', DB::raw("COALESCE(NULLIF(TRIM(p.product_name), ''), CONCAT('Product #', bi.product_id))"))
+    ->orderByDesc('qty')
     ->orderByDesc('amount')
     ->get()
-    ->map(fn($r) => [
-        'method' => $r->method,
-        'count'  => (int) $r->count,
-        'amount' => round((float) $r->amount, 2),
-    ])
-    ->values();
+        ->map(fn ($r) => [
+            'product_id'   => (int) $r->product_id,
+            'product_name' => $r->product_name,
+            'qty'          => (int) round((float) $r->qty),
+            'amount'       => round((float) $r->amount, 2),
+        ])
+        ->values();
 
-    $grossSales    = (float) ($salesAgg->gross_sales ?? 0);
-    $totalRefunds  = (float) ($salesAgg->total_refunds ?? 0);
-    $netSales      = $grossSales - $totalRefunds;
-    $countedCash   = isset($validated['counted_cash']) ? (float) $validated['counted_cash'] : null;
-    $expectedCash  = isset($validated['expected_cash']) ? (float) $validated['expected_cash'] : $grossSales;
-    $variance      = $countedCash !== null ? $countedCash - $expectedCash : null;
+    $grossSales       = (float) ($salesAgg->gross_sales ?? 0);
+    $totalRefunds     = (float) ($salesAgg->total_refunds ?? 0);
+    $netSales         = $grossSales - $totalRefunds;
+    $cashShiftSummary = $this->cashierShiftService->buildScopedDailySummary([$storeId], $today);
+    $countedCash      = isset($validated['counted_cash']) ? (float) $validated['counted_cash'] : null;
+    $expectedCash     = isset($validated['expected_cash'])
+        ? (float) $validated['expected_cash']
+        : (float) ($cashShiftSummary['total_expected_cash'] ?? $grossSales);
+    $variance         = $countedCash !== null ? $countedCash - $expectedCash : null;
 
     return response()->json([
         'message' => 'Shift closure finalized successfully.',
@@ -657,13 +697,20 @@ $paymentBreakdown = DB::table('payments as p')
             'net_sales'          => round($netSales, 2),
             'total_voids'        => (int) ($salesAgg->total_voids ?? 0),
             'total_drafts'       => (int) ($salesAgg->total_drafts ?? 0),
+            'opening_balance'    => round((float) ($cashShiftSummary['total_opening_balance'] ?? 0), 2),
+            'cash_sales'         => round((float) ($cashShiftSummary['total_cash_sales'] ?? 0), 2),
+            'non_cash_sales'     => round((float) ($cashShiftSummary['total_non_cash_sales'] ?? 0), 2),
             'expected_cash'      => round($expectedCash, 2),
             'counted_cash'       => $countedCash,
             'variance'           => $variance !== null ? round($variance, 2) : null,
             'payment_breakdown'  => $paymentBreakdown,
+            'cashier_shifts'     => $cashShiftSummary['rows'] ?? [],
+            'products_sold'      => $productsSold,
+            'total_items_sold'   => (int) $productsSold->sum('qty'),
         ],
     ]);
 }
+
 
     // ── Empty payload ─────────────────────────────────────────────────────
 
@@ -690,6 +737,12 @@ $paymentBreakdown = DB::table('payments as p')
                     'avg_ticket'        => 0,
                     'pending_orders'    => 0,
                     'unique_customers'  => 0,
+                    'opening_balance'   => 0,
+                    'cash_sales'        => 0,
+                    'non_cash_sales'    => 0,
+                    'expected_drawer_cash' => 0,
+                    'open_cashier_shifts' => 0,
+                    'closed_cashier_shifts' => 0,
                 ],
                 'stats' => [
                     'inventory_health_pct'    => 0,
@@ -712,6 +765,7 @@ $paymentBreakdown = DB::table('payments as p')
                 'top_items'            => [],
                 'cashier_performance'  => [],
                 'register_performance' => [],
+                'daily_cashier_summary' => [],
             ],
         ];
     }
@@ -833,20 +887,20 @@ $paymentBreakdown = DB::table('payments as p')
         return '0';
     }
 
-    private function productNameExpression(string $alias = 'p'): string
-    {
-        $parts = [];
+private function productNameExpression(string $alias = 'p'): string
+{
+    $parts = [];
 
-        foreach (['product_name', 'name', 'title', 'sku'] as $column) {
-            if ($this->hasColumn('products', $column)) {
-                $parts[] = "NULLIF(TRIM({$alias}.`{$column}`), '')";
-            }
+    foreach (['product_name', 'sku'] as $column) {
+        if ($this->hasColumn('products', $column)) {
+            $parts[] = "NULLIF(TRIM({$alias}.`{$column}`), '')";
         }
-
-        $parts[] = "'Unnamed item'";
-
-        return 'COALESCE(' . implode(', ', $parts) . ')';
     }
+
+    $parts[] = "'Unnamed item'";
+
+    return 'COALESCE(' . implode(', ', $parts) . ')';
+}
 
     private function customerNameExpression(string $alias = 'c'): string
     {

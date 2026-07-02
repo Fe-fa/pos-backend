@@ -19,6 +19,7 @@ class RolePermissionSeeder extends Seeder
         $allPermissions = [
             // ── Page visibility (controls nav links & route access) ───
             'page.dashboard',
+            'page.manager_dashboard', 
             'page.stores',
             'page.users',
             'page.cashiers',
@@ -79,6 +80,7 @@ class RolePermissionSeeder extends Seeder
         $managerPermissions = [
             // Pages
             'page.dashboard',
+            'page.manager_dashboard', 
             'page.stores',
             'page.users',
             'page.cashiers',
