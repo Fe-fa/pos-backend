@@ -22,6 +22,8 @@ use App\Http\Controllers\Api\ManagerDashboardController;
 use App\Http\Controllers\Api\PosSessionController;
 use App\Http\Controllers\Api\CashierShiftController;
 use App\Http\Controllers\Api\SupplierController;
+use App\Http\Controllers\Api\MpesaController;
+use App\Http\Controllers\Api\MpesaCallbackController;
 
 
 
@@ -65,6 +67,17 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/grns/{grn}/items/{grnItem}', [GrnController::class, 'deleteItem']);
     Route::post('/grns/{grn}/complete', [GrnController::class, 'complete']);
     Route::post('/grns/{grn}/charge', [GrnController::class, 'charge']);
+
+    Route::prefix('mpesa')->group(function () {
+    // Push STK to customer's phone
+    Route::post('/stk-push',                     [MpesaController::class, 'initiateStkPush']);
+    // Poll status while modal is open
+    Route::get ('/status/{checkoutRequestId}',   [MpesaController::class, 'status']);
+    // Cashier cancels an in-flight attempt
+    Route::post('/cancel/{checkoutRequestId}',   [MpesaController::class, 'cancel']);
+    // Manual receipt entry
+    Route::post('/validate-receipt',             [MpesaController::class, 'validateReceipt']);
+  });
 
     
 
@@ -148,3 +161,13 @@ Route::get('public/documents/{mode}/{uuid}', [PublicDocumentController::class, '
 Route::get('public/documents/{mode}/{uuid}/download', [PublicDocumentController::class, 'download'])
     ->where('mode', 'receipt|invoice')
     ->name('public.documents.download');
+
+    Route::prefix('mpesa/callbacks')
+    ->middleware('mpesa.callback')
+    ->group(function () {
+        Route::post('/stk',                    [MpesaCallbackController::class, 'stk']);
+        Route::post('/c2b/validation',         [MpesaCallbackController::class, 'c2bValidation']);
+        Route::post('/c2b/confirmation',       [MpesaCallbackController::class, 'c2bConfirmation']);
+        Route::post('/tx-status/result',       [MpesaCallbackController::class, 'txStatusResult']);
+        Route::post('/tx-status/timeout',      [MpesaCallbackController::class, 'txStatusTimeout']);
+    });

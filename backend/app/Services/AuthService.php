@@ -85,6 +85,66 @@ public function resendVerificationCode(User $user): void
 
     $user->notify(new \App\Notifications\EmailVerificationCode($code));
 }
+public function forgotPassword(string $email): void
+{
+    $user = User::where('email', $email)->first();
+
+    // FormRequest already validates exists:users,email, so this should
+    // always resolve — but guard anyway rather than assume.
+    if (! $user) {
+        return;
+    }
+
+    $plainToken = \Str::random(64);
+
+    $user->forceFill([
+        'password_reset_token'  => bcrypt($plainToken),
+        'password_reset_expiry' => now()->addMinutes(60),
+    ])->save();
+
+    $resetUrl = sprintf(
+        '%s/reset-password?token=%s&email=%s',
+        rtrim(config('app.frontend_url'), '/'),
+        $plainToken,
+        urlencode($user->email)
+    );
+
+    try {
+        $user->notify(new \App\Notifications\PasswordResetLink($resetUrl));
+    } catch (\Throwable $e) {
+        report($e);
+        throw \Illuminate\Validation\ValidationException::withMessages([
+            'email' => ['Unable to send reset link. Please try again later.'],
+        ]);
+    }
+}
+
+public function resetPassword(string $email, string $token, string $password): void
+{
+    $user = User::where('email', $email)->first();
+
+    if (
+        ! $user ||
+        empty($user->password_reset_token) ||
+        empty($user->password_reset_expiry) ||
+        now()->isAfter($user->password_reset_expiry) ||
+        ! \Hash::check($token, $user->password_reset_token)
+    ) {
+        throw \Illuminate\Validation\ValidationException::withMessages([
+            'token' => ['This password reset link is invalid or has expired.'],
+        ]);
+    }
+
+    $user->forceFill([
+        'password'               => $password,
+        'password_reset_token'   => null,
+        'password_reset_expiry'  => null,
+    ])->save();
+
+    // Reset password = good moment to kill all other sessions/tokens too.
+    $user->tokens()->delete();
+    $user->sessions()->delete();
+}
 
     public function login(array $credentials): array
     {

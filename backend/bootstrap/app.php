@@ -14,12 +14,20 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        // Prepend CORS middleware to the API stack
         $middleware->api(prepend: [
             \Illuminate\Http\Middleware\HandleCors::class,
         ]);
 
+        // Register all your route middleware aliases here
         $middleware->alias([
             'store.access' => EnsureStoreAccess::class,
+            'mpesa.callback' => \App\Http\Middleware\VerifyMpesaCallback::class,
+        ]);
+
+        // Exempt M-Pesa callbacks from CSRF (they're stateless POSTs from Safaricom)
+        $middleware->validateCsrfTokens(except: [
+            'api/mpesa/callbacks/*',
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

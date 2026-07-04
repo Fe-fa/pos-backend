@@ -100,28 +100,23 @@ public function resendVerification(Request $request): JsonResponse
     return response()->json(['message' => 'Verification code sent to your email.']);
 }
 
-    public function forgotPassword(ForgotPasswordRequest $request): JsonResponse
-    {
-        $status = Password::sendResetLink($request->only('email'));
+public function forgotPassword(ForgotPasswordRequest $request): JsonResponse
+{
+    $this->authService->forgotPassword($request->validated('email'));
 
-        return $status === Password::RESET_LINK_SENT
-            ? response()->json(['message' => 'Password reset link sent.'])
-            : response()->json(['message' => 'Unable to send reset link.'], 400);
-    }
+    return response()->json(['message' => 'Password reset link sent.']);
+}
 
-    public function resetPassword(ResetPasswordRequest $request): JsonResponse
-    {
-        $status = Password::reset(
-            $request->only('email', 'password', 'password_confirmation', 'token'),
-            function ($user, $password) {
-                $user->forceFill(['password' => $password])->save();
-            }
-        );
+public function resetPassword(ResetPasswordRequest $request): JsonResponse
+{
+    $this->authService->resetPassword(
+        $request->validated('email'),
+        $request->validated('token'),
+        $request->validated('password'),
+    );
 
-        return $status === Password::PASSWORD_RESET
-            ? response()->json(['message' => 'Password reset successful.'])
-            : response()->json(['message' => 'Password reset failed.'], 400);
-    }
+    return response()->json(['message' => 'Password reset successful.']);
+}
 
     public function sessions(Request $request): JsonResponse
     {

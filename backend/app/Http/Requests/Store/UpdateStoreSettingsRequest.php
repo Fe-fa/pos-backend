@@ -14,7 +14,8 @@ class UpdateStoreSettingsRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'settings' => ['required', 'array'],
+            'settings' => ['required_without:document_sequences', 'array'],
+            'document_sequences' => ['required_without:settings', 'array'],
 
             'settings.default_vat_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'settings.low_stock_alert' => ['nullable', 'integer', 'min:0'],

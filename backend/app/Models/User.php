@@ -39,6 +39,8 @@ class User extends Authenticatable implements MustVerifyEmail
         'shift_end',
         'verification_code',
         'verification_expiry',
+        'password_reset_token',
+        'password_reset_expiry',
         'is_active',
         'is_verified',
         'email_verified_at',
@@ -48,6 +50,7 @@ class User extends Authenticatable implements MustVerifyEmail
         'password',
         'remember_token',
         'verification_code',
+        'password_reset_token',
     ];
 
     protected $appends = [

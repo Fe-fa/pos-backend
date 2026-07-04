@@ -140,6 +140,17 @@ class DashboardController extends Controller
             ->where('current_balance', '>', 0)
             ->sum('current_balance');
 
+                    $mrrWindowStart = $now->copy()->subDays(30)->toDateString();
+
+        $mrrAgg = DB::table('billing')
+            ->selectRaw("SUM(CASE WHEN `status` IN ('paid','partial') AND is_draft = 0 THEN paid_amount ELSE 0 END) AS mrr_collected")
+            ->whereIntegerInRaw('store_id', $storeIds)
+            ->whereNull('deleted_at')
+            ->whereBetween(DB::raw('DATE(billing_date)'), [$mrrWindowStart, $today])
+            ->first();
+
+        $mrr = (float) ($mrrAgg->mrr_collected ?? 0);
+
         $cashShiftSummary = $this->cashierShiftService->buildScopedDailySummary($storeIds, $today);
 
         $last7Raw = DB::table('billing')
@@ -564,10 +575,9 @@ class DashboardController extends Controller
         return [
             'currency' => 'KES',
             'summary'  => [
-                'platform' => [
-                    'mrr' => 0, 'active_tenants' => 0, 'total_tenants' => 0,
-                    'new_tenants_30' => 0, 'prev_tenants_30' => 0, 'signup_rate' => 0,
-                    'churned_tenants_30' => 0, 'churn_rate' => 0,
+           'platform' => [
+                    'mrr'                => round($mrr, 2),
+                    'active_tenants'     => $activeTenantCount,
                 ],
                 'today' => [
                     'collected' => 0, 'orders' => 0, 'refund_value' => 0,
