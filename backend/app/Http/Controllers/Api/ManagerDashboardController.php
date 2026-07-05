@@ -597,6 +597,16 @@ public function finalizeShift(Request $request): JsonResponse
     $today = now()->toDateString();
     $now   = now();
 
+    abort_unless(array_key_exists('counted_cash', $validated) && $validated['counted_cash'] !== null, 422, 'Physical drawer count is required before running the final drawer reconciliation.');
+
+    $cashShiftSummary = $this->cashierShiftService->buildScopedDailySummary([$storeId], $today);
+
+    if ((int) ($cashShiftSummary['open_shift_count'] ?? 0) > 0) {
+        return response()->json([
+            'message' => 'Close each active cashier shift one by one from the cashier report before running the final store Z-Report.',
+        ], 422);
+    }
+
     $openVoids = DB::table('billing')
         ->where('store_id', $storeId)
         ->whereNull('deleted_at')
@@ -604,9 +614,27 @@ public function finalizeShift(Request $request): JsonResponse
         ->whereIn('status', ['void', 'voided', 'cancelled', 'canceled'])
         ->count();
 
-    if ($openVoids > 0) {
+    $pendingOrders = DB::table('billing')
+        ->where('store_id', $storeId)
+        ->whereNull('deleted_at')
+        ->whereDate('billing_date', $today)
+        ->where(function ($query) {
+            $query->where('is_draft', 1)
+                ->orWhereIn('status', ['draft', 'parked', 'quote', 'pending']);
+        })
+        ->count();
+
+    if ($openVoids > 0 || $pendingOrders > 0) {
+        $parts = [];
+        if ($openVoids > 0) {
+            $parts[] = "{$openVoids} void(s)";
+        }
+        if ($pendingOrders > 0) {
+            $parts[] = "{$pendingOrders} draft/pending sale(s)";
+        }
+
         return response()->json([
-            'message' => "Voids must be cleared before the Drawer Reconciliation can finalize a shift closure. {$openVoids} void(s) still need attention.",
+            'message' => 'Clear unresolved cashier items before the Drawer Reconciliation can finalize a shift closure: ' . implode(' and ', $parts) . '.',
         ], 422);
     }
 
@@ -676,7 +704,6 @@ $productsSold = DB::table('billing_items as bi')
     $grossSales       = (float) ($salesAgg->gross_sales ?? 0);
     $totalRefunds     = (float) ($salesAgg->total_refunds ?? 0);
     $netSales         = $grossSales - $totalRefunds;
-    $cashShiftSummary = $this->cashierShiftService->buildScopedDailySummary([$storeId], $today);
     $countedCash      = isset($validated['counted_cash']) ? (float) $validated['counted_cash'] : null;
     $expectedCash     = isset($validated['expected_cash'])
         ? (float) $validated['expected_cash']

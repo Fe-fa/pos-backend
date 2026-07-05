@@ -10,6 +10,7 @@ use App\Models\Store;
 use App\Models\User;
 use App\Services\AuditLogService;
 use App\Services\PaymentService;
+use App\Services\GrnService;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -37,6 +38,7 @@ class MpesaService
     public function __construct(
         private readonly PaymentService  $paymentService,
         private readonly AuditLogService $auditLogService,
+        private readonly GrnService      $grnService,
     ) {}
 
     // ─────────────────────────────────────────────────────────────
@@ -89,7 +91,9 @@ class MpesaService
         Billing $billing,
         User    $user,
         string  $phone,
-        ?float  $amount = null
+        ?float  $amount = null,
+        array   $splitAllocations = [],
+        int     $pointsRedeemed = 0
     ): MpesaTransaction {
         $store  = $billing->store()->firstOrFail();
         $amount = (float) ($amount ?? $billing->balance_due);
@@ -108,6 +112,10 @@ class MpesaService
             billingId:        $billing->billing_id,
             grnId:            null,
             lockKey:          "mpesa:lock:billing:{$billing->billing_id}",
+            pendingContext:   [
+                'split_allocations' => array_values($splitAllocations),
+                'points_redeemed' => max($pointsRedeemed, 0),
+            ],
         );
     }
 
@@ -147,6 +155,7 @@ class MpesaService
         ?int    $billingId,
         ?int    $grnId,
         string  $lockKey,
+        array   $pendingContext = [],
     ): MpesaTransaction {
         // ── Idempotency: if a pending attempt exists within TTL, return it.
         $existing = MpesaTransaction::query()
@@ -195,6 +204,7 @@ class MpesaService
                 'transaction_desc'  => $transactionDesc,
                 'status'            => 'pending',
                 'environment'       => $creds['environment'],
+                'request_payload'   => $pendingContext ?: null,
             ]);
 
             try {
@@ -211,7 +221,10 @@ class MpesaService
                     'merchant_request_id' => $response['MerchantRequestID'] ?? null,
                     'checkout_request_id' => $response['CheckoutRequestID'] ?? null,
                     'result_desc'         => $response['ResponseDescription'] ?? null,
-                    'request_payload'     => $response,
+                    'request_payload'     => [
+                        ...($txn->request_payload ?? []),
+                        'daraja_response' => $response,
+                    ],
                 ]);
             } catch (\Throwable $e) {
                 $txn->update([
@@ -574,33 +587,48 @@ class MpesaService
                     return;
                 }
 
-                $payment = $this->paymentService->charge($billing, $user, [
-                    'payment_method'  => 'mpesa',
-                    'amount_received' => (float) $txn->amount,
-                    'amount_tendered' => (float) $txn->amount,
-                    'mpesa_phone'     => $txn->phone_number,
-                    'mpesa_code'      => $txn->mpesa_receipt,
-                ]);
+                $pendingSplitAllocations = data_get($txn->request_payload, 'split_allocations', []);
+                $pointsRedeemed = (int) data_get($txn->request_payload, 'points_redeemed', 0);
 
-                // Persist M-Pesa metadata into the payments row.
-                Payment::where('payment_id', $payment->payment_id)->update([
+                $paymentPayload = !empty($pendingSplitAllocations)
+                    ? [
+                        'payment_allocations' => $this->materializeSplitAllocationsFromSuccessfulStk($txn, $pendingSplitAllocations),
+                        'points_redeemed' => $pointsRedeemed,
+                      ]
+                    : [
+                        'payment_method'  => 'mpesa',
+                        'amount_received' => (float) $txn->amount,
+                        'amount_tendered' => (float) $txn->amount,
+                        'mpesa_phone'     => $txn->phone_number,
+                        'mpesa_code'      => $txn->mpesa_receipt,
+                      ];
+
+                $payment = $this->paymentService->charge($billing, $user, $paymentPayload);
+
+                $resolvedPaymentId = Payment::query()
+                    ->where('billing_id', $billing->billing_id)
+                    ->where('payment_method', 'mpesa')
+                    ->where('amount_received', (float) $txn->amount)
+                    ->latest('payment_id')
+                    ->value('payment_id') ?? $payment->payment_id;
+
+                Payment::where('payment_id', $resolvedPaymentId)->update([
                     'mpesa_receipt'         => $txn->mpesa_receipt,
                     'mpesa_phone'           => $txn->phone_number,
                     'mpesa_transaction_id'  => $txn->mpesa_transaction_id,
                 ]);
 
-                $txn->update(['payment_id' => $payment->payment_id]);
+                $txn->update(['payment_id' => $resolvedPaymentId]);
             }
 
-            // GRN branch: your GrnService likely exposes a similar `charge()` — call it here
-            // if you want automatic supplier-payment materialisation. Left as an integration
-            // point since GrnService signature is app-specific.
             if ($txn->grn_id) {
-                Log::info('[Mpesa] GRN payment success — call GrnService::recordPayment here', [
-                    'txn_id' => $txn->mpesa_transaction_id,
-                    'grn_id' => $txn->grn_id,
-                ]);
+                $payment = $this->grnService->recordMpesaSettlement($txn);
+
+                if ($payment) {
+                    $txn->update(['payment_id' => $payment->grn_payment_id]);
+                }
             }
+
 
             $this->auditLogService->log(
                 'mpesa.confirmed',
@@ -611,6 +639,28 @@ class MpesaService
                 $txn->store_id
             );
         });
+    }
+
+    private function materializeSplitAllocationsFromSuccessfulStk(MpesaTransaction $txn, array $allocations): array
+    {
+        return array_map(function (array $row) use ($txn) {
+            $method = strtolower((string) ($row['payment_method'] ?? ''));
+            $mode = strtolower((string) ($row['mpesa_mode'] ?? ''));
+
+            if ($method === 'mpesa' && $mode === 'stk') {
+                return [
+                    ...$row,
+                    'payment_method' => 'mpesa',
+                    'amount_received' => (float) ($row['amount_received'] ?? $txn->amount),
+                    'amount_tendered' => (float) ($row['amount_tendered'] ?? $row['amount_received'] ?? $txn->amount),
+                    'mpesa_phone' => $txn->phone_number,
+                    'mpesa_code' => $txn->mpesa_receipt,
+                    'mpesa_mode' => 'manual',
+                ];
+            }
+
+            return $row;
+        }, $allocations);
     }
 
     /**

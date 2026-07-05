@@ -5,12 +5,14 @@ namespace App\Services;
 use App\Models\Grn;
 use App\Models\GrnItem;
 use App\Models\GrnPayment;
+use App\Models\MpesaTransaction;
 use App\Models\Supplier;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use RuntimeException;
 use Illuminate\Support\Facades\Schema;
 
 class GrnService
@@ -152,7 +154,7 @@ class GrnService
                 'release_to_inventory' => array_key_exists('release_to_inventory', $data)
                     ? (bool) $data['release_to_inventory']
                     : true,
-                'notes' => $data['notes'] ?? null,
+                'notes' => $paymentNotes !== '' ? $paymentNotes : null,
             ]);
 
             if (!$grn->grn_number) {
@@ -332,6 +334,17 @@ class GrnService
         return 'partial';
     }
 
+    private function resolveSettlementType(array $data, float $balanceDue): string
+    {
+        $explicit = strtolower((string) ($data['settlement_type'] ?? ''));
+        if (in_array($explicit, ['partial', 'immediate'], true)) {
+            return $explicit;
+        }
+
+        $amountReceived = round((float) ($data['amount_received'] ?? 0), 2);
+        return $amountReceived > 0 && $amountReceived < $balanceDue ? 'partial' : 'immediate';
+    }
+
     public function recalculateTotals(Grn $grn): Grn
     {
         $grn->load([
@@ -386,12 +399,29 @@ class GrnService
                 ], 422));
             }
 
-            $amountReceived = round((float) $data['amount_received'], 2);
+            $settlementType = $this->resolveSettlementType($data, $balanceDue);
+            $amountReceived = round((float) ($data['amount_received'] ?? 0), 2);
+
+            if ($settlementType === 'immediate' && $amountReceived <= 0) {
+                $amountReceived = round($balanceDue, 2);
+            }
+
+            if ($amountReceived <= 0) {
+                throw new HttpResponseException(response()->json([
+                    'message' => 'Payment amount must be greater than zero.',
+                ], 422));
+            }
+
             $amountTendered = round((float) ($data['amount_tendered'] ?? $amountReceived), 2);
             $amountPaid = round(min($amountReceived, $balanceDue), 2);
             $changeReturned = ($data['payment_method'] ?? 'cash') === 'cash'
                 ? round(max($amountTendered - $amountPaid, 0), 2)
                 : 0.0;
+
+            $paymentNotes = trim(implode(' · ', array_filter([
+                $settlementType === 'partial' ? 'Partial payment' : 'Full settlement',
+                $data['notes'] ?? null,
+            ])));
 
             $payment = GrnPayment::create([
                 'grn_id' => $grn->grn_id,
@@ -409,7 +439,7 @@ class GrnService
                 'card_reference' => $data['card_reference'] ?? null,
                 'card_holder' => $data['card_holder'] ?? null,
                 'bank_reference' => $data['bank_reference'] ?? null,
-                'notes' => $data['notes'] ?? null,
+                'notes' => $paymentNotes !== '' ? $paymentNotes : null,
                 'paid_at' => now(),
             ]);
 
@@ -432,6 +462,78 @@ class GrnService
             );
 
             return $grn->fresh()->load($this->detailRelations());
+        });
+    }
+
+    public function recordMpesaSettlement(MpesaTransaction $txn): ?GrnPayment
+    {
+        if (!$txn->grn_id) {
+            return null;
+        }
+
+        return DB::transaction(function () use ($txn) {
+            $txn = MpesaTransaction::query()->lockForUpdate()->findOrFail($txn->mpesa_transaction_id);
+
+            if ($txn->payment_id) {
+                return GrnPayment::query()->find($txn->payment_id);
+            }
+
+            $grn = Grn::query()->with('items')->lockForUpdate()->findOrFail($txn->grn_id);
+            $grn = $this->recalculateTotals($grn);
+
+            $balanceDue = (float) $grn->balance_due;
+            if ($balanceDue <= 0) {
+                return null;
+            }
+
+            $user = $txn->user()->first() ?? $grn->user()->first();
+            if (!$user) {
+                throw new RuntimeException('Unable to determine the user for GRN M-Pesa settlement.');
+            }
+
+            $amountReceived = round((float) $txn->amount, 2);
+            $amountPaid = round(min($amountReceived, $balanceDue), 2);
+
+            $payment = GrnPayment::create([
+                'grn_id' => $grn->grn_id,
+                'store_id' => $grn->store_id,
+                'user_id' => $user->user_id,
+                'payment_number' => null,
+                'payment_method' => 'mpesa',
+                'status' => 'posted',
+                'amount_paid' => $amountPaid,
+                'amount_received' => $amountReceived,
+                'amount_tendered' => $amountReceived,
+                'change_returned' => 0,
+                'mpesa_phone' => $txn->phone_number,
+                'mpesa_code' => $txn->mpesa_receipt,
+                'notes' => trim('Auto-posted from M-Pesa callback' . ($txn->account_reference ? ' [' . $txn->account_reference . ']' : '')),
+                'paid_at' => $txn->transaction_date ?? now(),
+            ]);
+
+            if (!$payment->payment_number) {
+                $payment->update([
+                    'payment_number' => 'GRNPAY-' . str_pad((string) $payment->grn_payment_id, 6, '0', STR_PAD_LEFT),
+                ]);
+            }
+
+            $grn = $this->recalculateTotals($grn->fresh());
+            $this->syncSupplierOutstanding($grn->supplier_id);
+
+            $this->auditLogService->log(
+                'grn.payment.auto_posted',
+                $payment,
+                null,
+                $payment->fresh()->toArray(),
+                [
+                    'grn_number' => $grn->grn_number,
+                    'mpesa_transaction_id' => $txn->mpesa_transaction_id,
+                    'mpesa_receipt' => $txn->mpesa_receipt,
+                ],
+                $grn->store_id
+            );
+
+            return $payment->fresh();
         });
     }
 
@@ -552,10 +654,17 @@ class GrnService
             return;
         }
 
+        $supplier = Supplier::query()->find($supplierId);
+        if (!$supplier) {
+            return;
+        }
+
         $outstandingBalance = (float) Grn::query()
             ->where('supplier_id', $supplierId)
             ->where('status', 'completed')
             ->sum('balance_due');
+
+        $outstandingBalance += (float) $supplier->opening_balance;
 
         Supplier::query()
             ->where('supplier_id', $supplierId)

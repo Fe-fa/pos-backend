@@ -168,6 +168,40 @@ class CashierShiftService
         $counted        = $countedCash !== null ? round($countedCash, 2) : null;
         $variance       = $counted !== null ? round($counted - $expectedCash, 2) : null;
 
+
+        abort_if($counted === null, 422, 'Physical drawer count is required before closing a shift.');
+
+        $pendingOrders = DB::table('billing')
+            ->where('store_id', $storeId)
+            ->where('user_id', $targetCashierId)
+            ->whereNull('deleted_at')
+            ->whereDate('billing_date', $resolvedDate)
+            ->where(function ($query) {
+                $query->where('is_draft', 1)
+                    ->orWhereIn('status', ['draft', 'parked', 'quote', 'pending']);
+            })
+            ->count();
+
+        $openVoids = DB::table('billing')
+            ->where('store_id', $storeId)
+            ->where('user_id', $targetCashierId)
+            ->whereNull('deleted_at')
+            ->whereDate('billing_date', $resolvedDate)
+            ->whereIn('status', ['void', 'voided', 'cancelled', 'canceled'])
+            ->count();
+
+        if ($pendingOrders > 0 || $openVoids > 0) {
+            $parts = [];
+            if ($openVoids > 0) {
+                $parts[] = "{$openVoids} void(s)";
+            }
+            if ($pendingOrders > 0) {
+                $parts[] = "{$pendingOrders} draft/pending sale(s)";
+            }
+
+            abort(422, 'Clear unresolved cashier items before closing this shift: ' . implode(' and ', $parts) . '.');
+        }
+
         $shift->update([
             'status'                 => 'closed',
             'closed_at'              => now(),
@@ -248,6 +282,7 @@ class CashierShiftService
             'total_expected_cash'     => round((float) $rows->sum('expected_cash'), 2),
             'total_counted_cash'      => round((float) $rows->filter(fn ($r) => $r['counted_cash'] !== null)->sum('counted_cash'), 2),
             'total_variance'          => round((float) $rows->filter(fn ($r) => $r['variance'] !== null)->sum('variance'), 2),
+            'total_pending_orders'    => (int) $rows->sum('pending_orders'),
             'total_carry_forward'     => round((float) $rows->sum('carry_forward_variance'), 2),
             'open_shift_count'        => (int) $rows->where('status', 'open')->count(),
             'closed_shift_count'      => (int) $rows->where('status', 'closed')->count(),
@@ -321,6 +356,7 @@ class CashierShiftService
                 SUM(CASE WHEN b.`status` IN ('paid','partial') AND b.is_draft = 0 THEN b.paid_amount ELSE 0 END) AS total_sales,
                 SUM(CASE WHEN b.balance_due > 0 AND b.is_draft = 0 THEN b.balance_due ELSE 0 END) AS outstanding,
                 COUNT(CASE WHEN b.`status` IN ('void','voided','cancelled','canceled') THEN 1 END) AS total_voids,
+                COUNT(CASE WHEN b.is_draft = 1 OR b.`status` IN ('draft','parked','quote','pending') THEN 1 END) AS pending_orders,
                 SUM(CASE WHEN b.`status` IN ('refund','refunded','returned','return') THEN b.`total` ELSE 0 END) AS refunds
             ")
             ->where('b.store_id', $storeId)
@@ -394,6 +430,7 @@ class CashierShiftService
             'refunds'                 => round((float) ($billingAgg->refunds ?? 0), 2),
             'outstanding'             => round((float) ($billingAgg->outstanding ?? 0), 2),
             'total_voids'             => (int) ($billingAgg->total_voids ?? 0),
+            'pending_orders'          => (int) ($billingAgg->pending_orders ?? 0),
             'expected_cash'           => $expectedCash,
             'counted_cash'            => $shiftRow?->counted_cash !== null ? round((float) $shiftRow->counted_cash, 2) : null,
             'variance'                => $shiftRow?->variance !== null ? round((float) $shiftRow->variance, 2) : null,
@@ -476,6 +513,7 @@ private function buildProductsSoldSummary(array $storeIds, ?int $cashierUserId, 
             'refunds'                 => 0,
             'outstanding'             => 0,
             'total_voids'             => 0,
+            'pending_orders'          => 0,
             'expected_cash'           => 0,
             'counted_cash'            => null,
             'variance'                => null,
@@ -505,6 +543,7 @@ private function buildProductsSoldSummary(array $storeIds, ?int $cashierUserId, 
             'total_expected_cash'     => 0,
             'total_counted_cash'      => 0,
             'total_variance'          => 0,
+            'total_pending_orders'    => 0,
             'total_carry_forward'     => 0,
             'open_shift_count'        => 0,
             'closed_shift_count'      => 0,

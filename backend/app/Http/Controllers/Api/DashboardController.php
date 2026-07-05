@@ -126,7 +126,7 @@ class DashboardController extends Controller
             $totalOrders, $openBalancesCount,
             $todayCollected, $todayOrders,
             $todayRefundValue, $todayRefundCount,
-            $todayVoids, $todayOutstanding,
+            $todayVoids, $todayOutstanding, $todayPendingOrders,
         ] = $this->sumBillingAgg($billingAgg);
 
         $averageTicket         = $totalOrders       > 0 ? $paidCollections / $totalOrders       : 0.0;
@@ -152,6 +152,12 @@ class DashboardController extends Controller
         $mrr = (float) ($mrrAgg->mrr_collected ?? 0);
 
         $cashShiftSummary = $this->cashierShiftService->buildScopedDailySummary($storeIds, $today);
+
+        $activeShiftFocus = collect($cashShiftSummary['rows'] ?? [])
+            ->filter(fn ($row) => ($row['status'] ?? null) === 'open')
+            ->sortBy(fn ($row) => $row['opened_at'] ?? '9999-12-31T23:59:59Z')
+            ->values()
+            ->first();
 
         $last7Raw = DB::table('billing')
             ->select([
@@ -300,12 +306,16 @@ class DashboardController extends Controller
                     'refund_value' => round($todayRefundValue, 2),
                     'refund_count' => $todayRefundCount,
                     'voids'        => $todayVoids,
+                    'pending_orders' => $todayPendingOrders,
+                    'approval_required' => $todayPendingOrders,
                     'outstanding'  => round($customerOutstanding, 2),
                     'new_tenants'  => $newTenantsToday,
                     'opening_balance' => round((float) ($cashShiftSummary['total_opening_balance'] ?? 0), 2),
                     'cash_sales' => round((float) ($cashShiftSummary['total_cash_sales'] ?? 0), 2),
                     'non_cash_sales' => round((float) ($cashShiftSummary['total_non_cash_sales'] ?? 0), 2),
                     'expected_drawer_cash' => round((float) ($cashShiftSummary['total_expected_cash'] ?? 0), 2),
+                    'open_cashier_shifts' => (int) ($cashShiftSummary['open_shift_count'] ?? 0),
+                    'closed_cashier_shifts' => (int) ($cashShiftSummary['closed_shift_count'] ?? 0),
                 ],
                 'stats' => [
                     'gross_billed'             => round($grossBilled, 2),
@@ -332,6 +342,7 @@ class DashboardController extends Controller
                 'store_performance' => $storePerformance,
                 'low_stock_rows'    => $lowStockRows,  
                 'daily_cashier_summary' => $cashShiftSummary['rows'] ?? [],
+                'active_shift_focus' => $activeShiftFocus,
             ],
             'trends' => [
                 'last_7_days' => $last7Days,
@@ -544,14 +555,15 @@ class DashboardController extends Controller
             DB::raw("COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND `status` != 'draft' AND is_draft = 0 THEN 1 END) AS today_orders"),
             DB::raw("SUM(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('refund','refunded') THEN `total` ELSE 0 END) AS today_refund_value"),
             DB::raw("COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('refund','refunded') THEN 1 END) AS today_refund_count"),
-            DB::raw("COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND is_draft = 1 THEN 1 END) AS today_voids"),
+            DB::raw("COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND (is_draft = 1 OR `status` IN ('void','voided','cancelled','canceled')) THEN 1 END) AS today_voids"),
             DB::raw("SUM(CASE WHEN is_draft = 0 AND balance_due > 0 THEN balance_due ELSE 0 END) AS today_outstanding"),
+            DB::raw("COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND (is_draft = 1 OR `status` IN ('draft','parked','quote','pending')) THEN 1 END) AS today_pending_orders"),
         ];
     }
 
     private function sumBillingAgg($billingAgg): array
     {
-        $acc = array_fill(0, 11, 0.0);
+        $acc = array_fill(0, 12, 0.0);
 
         foreach ($billingAgg as $row) {
             $acc[0]  += (float) $row->gross_billed;
@@ -565,6 +577,7 @@ class DashboardController extends Controller
             $acc[8]  += (int)   $row->today_refund_count;
             $acc[9]  += (int)   $row->today_voids;
             $acc[10] += (float) $row->today_outstanding;
+            $acc[11] += (int)   $row->today_pending_orders;
         }
 
         return $acc;
@@ -575,14 +588,20 @@ class DashboardController extends Controller
         return [
             'currency' => 'KES',
             'summary'  => [
-           'platform' => [
-                    'mrr'                => round($mrr, 2),
-                    'active_tenants'     => $activeTenantCount,
+                'platform' => [
+                    'mrr'                => 0,
+                    'active_tenants'     => 0,
+                    'total_tenants'      => 0,
+                    'new_tenants_30'     => 0,
+                    'prev_tenants_30'    => 0,
+                    'signup_rate'        => 0,
+                    'churned_tenants_30' => 0,
+                    'churn_rate'         => 0,
                 ],
                 'today' => [
                     'collected' => 0, 'orders' => 0, 'refund_value' => 0,
-                    'refund_count' => 0, 'voids' => 0, 'outstanding' => 0, 'new_tenants' => 0,
-                    'opening_balance' => 0, 'cash_sales' => 0, 'non_cash_sales' => 0, 'expected_drawer_cash' => 0,
+                    'refund_count' => 0, 'voids' => 0, 'pending_orders' => 0, 'approval_required' => 0, 'outstanding' => 0, 'new_tenants' => 0,
+                    'opening_balance' => 0, 'cash_sales' => 0, 'non_cash_sales' => 0, 'expected_drawer_cash' => 0, 'open_cashier_shifts' => 0, 'closed_cashier_shifts' => 0,
                 ],
                 'stats' => [
                     'gross_billed' => 0, 'paid_collections' => 0, 'outstanding_total' => 0,
@@ -598,6 +617,7 @@ class DashboardController extends Controller
                 'store_performance' => [],
                 'low_stock_rows'    => [], 
                 'daily_cashier_summary' => [],
+                'active_shift_focus' => null,
             ],
             'trends' => ['last_7_days' => []],
         ];

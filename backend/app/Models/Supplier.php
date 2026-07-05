@@ -23,11 +23,13 @@ class Supplier extends Model
         'email',
         'address',
         'opening_balance',
+        'outstanding_balance',
     ];
 
     protected $casts = [
         'is_active' => 'boolean',
         'opening_balance' => 'float',
+        'outstanding_balance' => 'float',
     ];
 
     protected $appends = ['total_invoiced', 'total_paid', 'balance'];

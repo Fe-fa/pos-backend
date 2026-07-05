@@ -6,16 +6,23 @@ use App\Http\Controllers\Controller;
 use App\Models\Supplier;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Schema;
 
 class SupplierController extends Controller
 {
     public function index(Request $request): JsonResponse
     {
+        $columns = [
+            'supplier_id', 'supplier_name', 'store_id', 'is_active',
+            'contact_person', 'phone', 'email', 'address', 'opening_balance',
+        ];
+
+        if (Schema::hasColumn('suppliers', 'outstanding_balance')) {
+            $columns[] = 'outstanding_balance';
+        }
+
         $query = Supplier::query()
-            ->select([
-                'supplier_id', 'supplier_name', 'store_id', 'is_active',
-                'contact_person', 'phone', 'email', 'address', 'opening_balance',
-            ])
+            ->select($columns)
             ->withSum(['grns as total_invoiced' => fn ($q) => $q->where('status', 'completed')], 'final_total')
             ->withSum(['grns as total_paid' => fn ($q) => $q->where('status', 'completed')], 'paid_amount');
 
@@ -41,7 +48,14 @@ class SupplierController extends Controller
         $suppliers = $query->orderBy('supplier_name')->paginate($perPage);
 
         return response()->json([
-            'data' => $suppliers->items(),
+            'data' => collect($suppliers->items())->map(function (Supplier $supplier) {
+                $row = $supplier->toArray();
+                $row['total_invoiced'] = round((float) $supplier->total_invoiced, 2);
+                $row['total_paid'] = round((float) $supplier->total_paid, 2);
+                $row['balance'] = round((float) $supplier->balance, 2);
+                $row['outstanding_balance'] = round((float) ($row['outstanding_balance'] ?? $supplier->balance), 2);
+                return $row;
+            })->values(),
             'meta' => [
                 'current_page' => $suppliers->currentPage(),
                 'last_page' => $suppliers->lastPage(),
@@ -54,11 +68,21 @@ class SupplierController extends Controller
     public function show($supplier): JsonResponse
     {
         $record = Supplier::query()
+            ->when(
+                Schema::hasColumn('suppliers', 'outstanding_balance'),
+                fn ($query) => $query->addSelect('outstanding_balance')
+            )
             ->withSum(['grns as total_invoiced' => fn ($q) => $q->where('status', 'completed')], 'final_total')
             ->withSum(['grns as total_paid' => fn ($q) => $q->where('status', 'completed')], 'paid_amount')
             ->findOrFail($supplier);
 
-        return response()->json(['data' => $record]);
+        $payload = $record->toArray();
+        $payload['total_invoiced'] = round((float) $record->total_invoiced, 2);
+        $payload['total_paid'] = round((float) $record->total_paid, 2);
+        $payload['balance'] = round((float) $record->balance, 2);
+        $payload['outstanding_balance'] = round((float) ($payload['outstanding_balance'] ?? $record->balance), 2);
+
+        return response()->json(['data' => $payload]);
     }
 
     public function store(Request $request): JsonResponse
@@ -76,9 +100,13 @@ class SupplierController extends Controller
 
         $supplier = Supplier::create($validated);
 
+        if (Schema::hasColumn('suppliers', 'outstanding_balance')) {
+            $supplier->update(['outstanding_balance' => round((float) $supplier->opening_balance, 2)]);
+        }
+
         return response()->json([
             'message' => 'Supplier created successfully.',
-            'data' => $supplier,
+            'data' => $supplier->fresh(),
         ], 201);
     }
 
@@ -99,6 +127,12 @@ class SupplierController extends Controller
 
         $record->update($validated);
 
+        if (Schema::hasColumn('suppliers', 'outstanding_balance')) {
+            $record->update([
+                'outstanding_balance' => round((float) $record->balance, 2),
+            ]);
+        }
+
         return response()->json([
             'message' => 'Supplier updated successfully.',
             'data' => $record->fresh(),
@@ -118,7 +152,7 @@ class SupplierController extends Controller
         $record = Supplier::findOrFail($supplier);
 
         $grns = $record->postedGrns()
-            ->select(['grn_id', 'grn_number', 'grn_date', 'invoice_number', 'final_total', 'paid_amount'])
+            ->select(['grn_id', 'grn_number', 'grn_date', 'invoice_number', 'final_total', 'paid_amount', 'balance_due'])
             ->orderBy('grn_date')
             ->orderBy('grn_id')
             ->get();
