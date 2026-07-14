@@ -19,7 +19,9 @@ class GrnPayment extends Model
         'grn_id',
         'store_id',
         'user_id',
+        'payment_voucher_id',
         'payment_number',
+        'payment_voucher_number',
         'payment_method',
         'status',
         'amount_paid',
@@ -52,6 +54,11 @@ class GrnPayment extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class, 'user_id', 'user_id');
+    }
+
+    public function paymentVoucher(): BelongsTo
+    {
+        return $this->belongsTo(PaymentVoucher::class, 'payment_voucher_id', 'payment_voucher_id');
     }
 
     public function getRouteKeyName(): string

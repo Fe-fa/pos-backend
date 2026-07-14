@@ -22,7 +22,7 @@ class BillingItemService
             ], 422));
         }
 
-if (isset($data['unit_price']) && (float) $data['unit_price'] <= 0) {
+        if (isset($data['unit_price']) && (float) $data['unit_price'] <= 0) {
             $existingFreeItem = $billing->items()
                 ->where('product_id', $data['product_id'])
                 ->where('unit_price', '<=', 0)
@@ -37,7 +37,7 @@ if (isset($data['unit_price']) && (float) $data['unit_price'] <= 0) {
                 }
 
                 return $this->updateItem($existingFreeItem, [
-                    'quantity'   => $newQty,
+                    'quantity' => $newQty,
                     'unit_price' => 0,
                 ]);
             }
@@ -63,6 +63,8 @@ if (isset($data['unit_price']) && (float) $data['unit_price'] <= 0) {
             'product_id' => $product->product_id,
             'quantity' => $qty,
             'unit_price' => $unitPrice,
+            'unit_selling_price' => $unitPrice,
+            'unit_cost_price' => (float) ($product->cost_price ?? 0),
             'line_subtotal' => $lineSubtotal,
             'vat_rate' => $vatRate,
             'vat_amount' => $vatAmount,
@@ -113,6 +115,8 @@ if (isset($data['unit_price']) && (float) $data['unit_price'] <= 0) {
         $item->update([
             'quantity' => $qty,
             'unit_price' => $unitPrice,
+            'unit_selling_price' => $unitPrice,
+            'unit_cost_price' => (float) ($product->cost_price ?? 0),
             'line_subtotal' => $lineSubtotal,
             'vat_rate' => $vatRate,
             'vat_amount' => $vatAmount,

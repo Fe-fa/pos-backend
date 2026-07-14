@@ -341,6 +341,8 @@ public function authorizeBillingAccess(Billing $billing, ?User $actor = null, bo
                 'Invoice'
             );
 
+            $this->snapshotHistoricalPricing($billing);
+
             foreach ($billing->items as $item) {
                 $this->inventoryService->consumeFifo(
                     user: $user,
@@ -371,6 +373,18 @@ public function authorizeBillingAccess(Billing $billing, ?User $actor = null, bo
 
             return $billing->fresh()->load(['customer', 'store', 'user', 'items.product', 'payments']);
         });
+    }
+
+    private function snapshotHistoricalPricing(Billing $billing): void
+    {
+        $billing->loadMissing(['items.product']);
+
+        foreach ($billing->items as $item) {
+            $item->forceFill([
+                'unit_selling_price' => round((float) ($item->unit_price ?? 0), 2),
+                'unit_cost_price' => round((float) ($item->product?->cost_price ?? $item->unit_cost_price ?? 0), 2),
+            ])->saveQuietly();
+        }
     }
 
     public function destroy(Billing $billing): void

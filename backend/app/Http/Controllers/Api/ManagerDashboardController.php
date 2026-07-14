@@ -111,7 +111,7 @@ $stores = Store::query()
                 COUNT(CASE WHEN DATE(billing_date) = '{$today}' AND `status` IN ('void','voided','cancelled','canceled') THEN 1 END) AS today_voids,
                 COUNT(CASE WHEN DATE(billing_date) = '{$yesterday}' AND `status` IN ('void','voided','cancelled','canceled') THEN 1 END) AS yesterday_voids,
 
-                COUNT(CASE WHEN {$fulfillmentPendingExpr} THEN 1 END) AS pending_orders_count,
+                COUNT(CASE WHEN {$fulfillmentPendingExpr} THEN 1 END) AS pending_sales_count,
 
                 COUNT(DISTINCT CASE
                     WHEN DATE(billing_date) = '{$today}' AND `status` IN ('paid','partial') AND is_draft = 0
@@ -127,6 +127,12 @@ $stores = Store::query()
             ->whereIntegerInRaw('store_id', $storeIds)
             ->whereNull('deleted_at')
             ->first();
+
+        $pendingPurchaseOrdersCount = DB::table('purchase_orders')
+            ->whereIntegerInRaw('store_id', $storeIds)
+            ->whereNull('deleted_at')
+            ->whereIn('status', ['draft', 'ordered', 'partially_received'])
+            ->count();
 
         $itemCostExpr   = $this->itemCostExpression('bi', 'p');
         $lineAmountExpr = $this->lineAmountExpression('bi');
@@ -346,7 +352,8 @@ $stores = Store::query()
                     'profit'            => round($todayProfit, 2),
                     'profit_prev'       => round($yesterdayProfit, 2),
                     'avg_ticket'        => round($avgTicket, 2),
-                    'pending_orders'    => (int) ($billingAgg->pending_orders_count ?? 0),
+                    'pending_orders'    => (int) $pendingPurchaseOrdersCount,
+                    'pending_sales'     => (int) ($billingAgg->pending_sales_count ?? 0),
                     'unique_customers'  => (int) ($billingAgg->unique_customers_today ?? 0),
                     'opening_balance'   => round((float) ($cashShiftSummary['total_opening_balance'] ?? 0), 2),
                     'cash_sales'        => round((float) ($cashShiftSummary['total_cash_sales'] ?? 0), 2),
@@ -506,36 +513,105 @@ $recent = DB::table('billing as b')
             ])
             ->values();
 
-        $pendingOrders = DB::table('billing as b')
-            ->leftJoin('customers as c', 'c.customer_id', '=', 'b.customer_id')
+        $purchaseOrderActorExpr = $this->userNameExpression('u');
+
+        $purchaseOrdersBase = DB::table('purchase_orders as po')
+            ->leftJoin('suppliers as s', 's.supplier_id', '=', 'po.supplier_id')
+            ->leftJoin('users as u', 'u.user_id', '=', 'po.user_id')
             ->selectRaw("
-                b.billing_id,
-                b.invnumber,
-                b.`status`,
-                b.is_draft,
-                b.`total`,
-                b.paid_amount,
-                b.billing_date,
-                {$customerNameExpr} AS customer_name
+                po.purchase_order_id,
+                po.po_number,
+                po.status,
+                po.order_date,
+                po.expected_delivery_date,
+                po.final_total,
+                po.created_at,
+                po.updated_at,
+                po.dispatched_at,
+                po.email_sent_at,
+                po.completed_at,
+                COALESCE(NULLIF(TRIM(s.supplier_name), ''), CONCAT('Supplier #', po.supplier_id)) AS supplier_name,
+                {$purchaseOrderActorExpr} AS user_name
             ")
-            ->whereIntegerInRaw('b.store_id', $storeIds)
-            ->whereNull('b.deleted_at')
-            ->where(function ($q) {
-                $q->where('b.is_draft', 1)
-                  ->orWhereIn('b.status', ['draft', 'parked', 'quote', 'pending']);
-            })
-            ->orderByDesc('b.billing_date')
+            ->whereIntegerInRaw('po.store_id', $storeIds)
+            ->whereNull('po.deleted_at');
+
+        $pendingOrders = (clone $purchaseOrdersBase)
+            ->whereIn('po.status', ['draft', 'ordered', 'partially_received'])
+            ->orderByDesc(DB::raw('COALESCE(po.updated_at, po.created_at, po.order_date)'))
             ->limit(8)
             ->get()
             ->map(fn ($row) => [
-                'billing_id'    => (int) $row->billing_id,
-                'invnumber'     => $row->invnumber ?: "Draft #{$row->billing_id}",
-                'status'        => strtolower((string) ($row->status ?: ($row->is_draft ? 'draft' : 'unknown'))),
-                'total'         => round((float) ($row->total ?? 0), 2),
-                'paid_amount'   => round((float) ($row->paid_amount ?? 0), 2),
-                'billing_date'  => $row->billing_date,
-                'customer_name' => $row->customer_name ?: 'Walk-in customer',
+                'purchase_order_id'       => (int) $row->purchase_order_id,
+                'po_number'               => $row->po_number ?: "PO-{$row->purchase_order_id}",
+                'status'                  => strtolower((string) ($row->status ?: 'draft')),
+                'total'                   => round((float) ($row->final_total ?? 0), 2),
+                'supplier_name'           => $row->supplier_name ?: 'Unknown supplier',
+                'user_name'               => $row->user_name ?: 'System',
+                'order_date'              => $row->order_date,
+                'expected_delivery_date'  => $row->expected_delivery_date,
+                'pending_at'              => $row->updated_at ?: $row->created_at ?: $row->order_date,
             ])
+            ->values();
+
+        $purchaseOrderHistory = (clone $purchaseOrdersBase)
+            ->orderByDesc(DB::raw('COALESCE(po.updated_at, po.created_at, po.order_date)'))
+            ->limit(12)
+            ->get()
+            ->map(fn ($row) => [
+                'purchase_order_id' => (int) $row->purchase_order_id,
+                'po_number'         => $row->po_number ?: "PO-{$row->purchase_order_id}",
+                'status'            => strtolower((string) ($row->status ?: 'draft')),
+                'supplier_name'     => $row->supplier_name ?: 'Unknown supplier',
+                'user_name'         => $row->user_name ?: 'System',
+                'created_at'        => $row->created_at,
+                'updated_at'        => $row->updated_at,
+                'dispatched_at'     => $row->dispatched_at,
+                'email_sent_at'     => $row->email_sent_at,
+                'completed_at'      => $row->completed_at,
+            ]);
+
+        $auditTrail = $purchaseOrderHistory
+            ->flatMap(function (array $row) {
+                $events = [];
+                $pushEvent = function ($timestamp, string $eventLabel, ?string $statusLabel = null) use (&$events, $row) {
+                    if (! $timestamp) {
+                        return;
+                    }
+
+                    $events[] = [
+                        'key'         => md5($row['purchase_order_id'] . '|' . $eventLabel . '|' . $timestamp),
+                        'timestamp'   => $timestamp,
+                        'event'       => $eventLabel . ' · ' . $row['po_number'],
+                        'cashier'     => $row['user_name'] ?: 'System',
+                        'authorizer'  => '—',
+                        'fulfillment' => ucfirst(str_replace('_', ' ', $statusLabel ?: $row['status'] ?: 'draft')),
+                        'requiresAuth'=> false,
+                    ];
+                };
+
+                $pushEvent($row['created_at'], 'Draft created', 'draft');
+
+                if (! empty($row['updated_at']) && $row['updated_at'] !== $row['created_at']) {
+                    $pushEvent($row['updated_at'], 'Draft updated', $row['status']);
+                }
+
+                if (! empty($row['dispatched_at'])) {
+                    $pushEvent($row['dispatched_at'], 'Order placed', 'ordered');
+                }
+
+                if (! empty($row['email_sent_at'])) {
+                    $pushEvent($row['email_sent_at'], 'Supplier email sent', $row['status']);
+                }
+
+                if (! empty($row['completed_at'])) {
+                    $pushEvent($row['completed_at'], 'Order completed', 'completed');
+                }
+
+                return $events;
+            })
+            ->sortByDesc(fn (array $row) => strtotime((string) $row['timestamp']))
+            ->take(8)
             ->values();
 
         $lowStockRows = DB::table('inventory as i')
@@ -567,6 +643,7 @@ $recent = DB::table('billing as b')
             'activity' => [
                 'recent'         => $recent,
                 'pending_orders' => $pendingOrders,
+                'audit_trail'    => $auditTrail,
                 'low_stock_rows' => $lowStockRows,
             ],
         ]);
@@ -763,6 +840,7 @@ $productsSold = DB::table('billing_items as bi')
                     'profit_prev'       => 0,
                     'avg_ticket'        => 0,
                     'pending_orders'    => 0,
+                    'pending_sales'     => 0,
                     'unique_customers'  => 0,
                     'opening_balance'   => 0,
                     'cash_sales'        => 0,

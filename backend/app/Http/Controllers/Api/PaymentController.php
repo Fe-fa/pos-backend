@@ -9,8 +9,10 @@ use App\Http\Requests\Payment\ChargeCartRequest;
 use App\Models\Billing;
 use App\Models\Payment;
 use App\Services\PaymentService;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class PaymentController extends Controller
 {
@@ -22,76 +24,30 @@ class PaymentController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        if ($error = $this->authorizePermission('payments.view')) return $error;
+        if ($error = $this->authorizePermission('payments.view')) {
+            return $error;
+        }
 
         $perPage = max(1, min((int) ($request->per_page ?? 15), 100));
-        $search = trim((string) $request->search);
+        $filteredPayments = $this->applyLedgerFilters(Payment::query(), $request);
+        $profitabilityByBilling = $this->profitabilityByBillingSubquery();
 
-        $baseQuery = Payment::query()
+        $payments = (clone $filteredPayments)
+            ->leftJoinSub($profitabilityByBilling, 'billing_profit', function ($join) {
+                $join->on('billing_profit.billing_id', '=', 'payments.billing_id');
+            })
+            ->select('payments.*')
+            ->selectRaw('COALESCE(billing_profit.gross_sales, 0) as gross_sales_total')
+            ->selectRaw('COALESCE(billing_profit.cost_of_goods, 0) as cost_of_goods_total')
+            ->selectRaw('COALESCE(billing_profit.gross_profit_total, 0) as gross_profit_total')
+            ->selectRaw('COALESCE(billing_profit.units_sold, 0) as profit_units_sold')
             ->with([
                 'billing:billing_id,uuid,invnumber,customer_id,store_id,user_id,total,vat_amount,balance_due,points_discount,notes,created_at',
                 'billing.customer:customer_id,full_name,email,phone',
                 'billing.store:store_id,store_name,currency',
                 'billing.user:user_id,first_name,last_name,email',
             ])
-            ->when($request->filled('store_id'), fn ($q) =>
-                $q->whereHas('billing', fn ($b) => $b->where('billing.store_id', $request->store_id))
-            )
-            ->when($request->filled('status'), fn ($q) =>
-                $q->whereHas('billing', fn ($b) => $b->where('billing.status', $request->status))
-            )
-            ->when($request->filled('payment_method'), fn ($q) =>
-                $q->where('payments.payment_method', $request->payment_method)
-            )
-            ->when($request->filled('date_from'), fn ($q) =>
-                $q->whereDate('payments.payment_date', '>=', $request->date_from)
-            )
-            ->when($request->filled('date_to'), fn ($q) =>
-                $q->whereDate('payments.payment_date', '<=', $request->date_to)
-            )
-            ->when($request->filled('user_id'), fn ($q) =>
-                $q->whereHas('billing', fn ($b) => $b->where('billing.user_id', $request->user_id))
-            )
-            ->when($request->filled('category_id'), fn ($q) =>
-                $q->whereHas('billing.items.product', fn ($p) =>
-                    $p->where('category_id', $request->category_id)
-                )
-            )
-            ->when($search !== '', function ($q) use ($search) {
-                $q->where(function ($sub) use ($search) {
-                    $sub->where('receiptnumber', 'like', "%{$search}%")
-                        ->orWhereHas('billing', function ($b) use ($search) {
-                            $b->where('invnumber', 'like', "%{$search}%")
-                                ->orWhereHas('customer', function ($c) use ($search) {
-                                    $c->where('full_name', 'like', "%{$search}%")
-                                        ->orWhere('email', 'like', "%{$search}%")
-                                        ->orWhere('phone', 'like', "%{$search}%");
-                                })
-                                ->orWhereHas('user', function ($u) use ($search) {
-                                    $u->where('first_name', 'like', "%{$search}%")
-                                        ->orWhere('last_name', 'like', "%{$search}%")
-                                        ->orWhere('email', 'like', "%{$search}%");
-                                });
-                        });
-                });
-            });
-
-        $summaryRows = (clone $baseQuery)->get();
-
-        $cashTotal = $summaryRows
-            ->where('payment_method', 'cash')
-            ->sum('amount_received');
-
-        $cardTotal = $summaryRows
-            ->filter(fn ($payment) => in_array(strtolower((string) $payment->payment_method), ['card', 'visa', 'mastercard', 'pos']))
-            ->sum('amount_received');
-
-        $digitalTotal = $summaryRows
-            ->filter(fn ($payment) => in_array(strtolower((string) $payment->payment_method), ['mpesa', 'airtel_money', 'wallet', 'digital_wallet', 'bank']))
-            ->sum('amount_received');
-
-        $payments = (clone $baseQuery)
-            ->orderByDesc('payment_id')
+            ->orderByDesc('payments.payment_id')
             ->paginate($perPage);
 
         return response()->json([
@@ -104,24 +60,15 @@ class PaymentController extends Controller
                 'from' => $payments->firstItem(),
                 'to' => $payments->lastItem(),
             ],
-            'summary' => [
-                'filtered_count' => $summaryRows->count(),
-                'total_received' => (float) $summaryRows->sum('amount_received'),
-                'cash_total' => (float) $cashTotal,
-                'card_total' => (float) $cardTotal,
-                'digital_total' => (float) $digitalTotal,
-                'refunded_count' => (int) $summaryRows->where('status', 'refunded')->count(),
-                'failed_count' => (int) $summaryRows->where('status', 'failed')->count(),
-                'average_ticket' => $summaryRows->count() > 0
-                    ? round((float) $summaryRows->sum('amount_received') / $summaryRows->count(), 2)
-                    : 0,
-            ],
+            'summary' => $this->buildLedgerSummary($filteredPayments, $profitabilityByBilling),
         ]);
     }
 
     public function show(Request $request, Payment $payment): JsonResponse
     {
-        if ($error = $this->authorizePermission('payments.view')) return $error;
+        if ($error = $this->authorizePermission('payments.view')) {
+            return $error;
+        }
 
         $payment->load([
             'billing.customer',
@@ -139,7 +86,9 @@ class PaymentController extends Controller
 
     public function charge(ChargeBillingRequest $request, Billing $billing): JsonResponse
     {
-        if ($error = $this->authorizePermission('payments.charge')) return $error;
+        if ($error = $this->authorizePermission('payments.charge')) {
+            return $error;
+        }
 
         return response()->json([
             'message' => 'Payment recorded successfully.',
@@ -153,7 +102,9 @@ class PaymentController extends Controller
 
     public function chargeCart(ChargeCartRequest $request): JsonResponse
     {
-        if ($error = $this->authorizePermission('payments.charge')) return $error;
+        if ($error = $this->authorizePermission('payments.charge')) {
+            return $error;
+        }
 
         $payload = $request->validated();
         $payment = $payload['payment'] ?? [];
@@ -202,5 +153,126 @@ class PaymentController extends Controller
             'message' => 'Payment recorded successfully.',
             'data' => $result,
         ], 201);
+    }
+
+    private function applyLedgerFilters(Builder $query, Request $request): Builder
+    {
+        $search = trim((string) $request->search);
+
+        return $query
+            ->when($request->filled('store_id'), fn (Builder $q) =>
+                $q->whereHas('billing', fn (Builder $billing) =>
+                    $billing->where('billing.store_id', (int) $request->store_id)
+                )
+            )
+            ->when($request->filled('status'), fn (Builder $q) =>
+                $q->whereHas('billing', fn (Builder $billing) =>
+                    $billing->where('billing.status', $request->status)
+                )
+            )
+            ->when($request->filled('payment_method'), fn (Builder $q) =>
+                $q->where('payments.payment_method', $request->payment_method)
+            )
+            ->when($request->filled('date_from'), fn (Builder $q) =>
+                $q->whereDate('payments.payment_date', '>=', $request->date_from)
+            )
+            ->when($request->filled('date_to'), fn (Builder $q) =>
+                $q->whereDate('payments.payment_date', '<=', $request->date_to)
+            )
+            ->when($request->filled('user_id'), fn (Builder $q) =>
+                $q->whereHas('billing', fn (Builder $billing) =>
+                    $billing->where('billing.user_id', (int) $request->user_id)
+                )
+            )
+            ->when($request->filled('category_id'), fn (Builder $q) =>
+                $q->whereHas('billing.items.product', fn (Builder $product) =>
+                    $product->where('category_id', (int) $request->category_id)
+                )
+            )
+            ->when($request->filled('product_id'), fn (Builder $q) =>
+                $q->whereHas('billing.items', fn (Builder $items) =>
+                    $items->where('product_id', (int) $request->product_id)
+                )
+            )
+            ->when($search !== '', function (Builder $q) use ($search) {
+                $q->where(function (Builder $sub) use ($search) {
+                    $sub->where('receiptnumber', 'like', "%{$search}%")
+                        ->orWhereHas('billing', function (Builder $billing) use ($search) {
+                            $billing->where('invnumber', 'like', "%{$search}%")
+                                ->orWhereHas('customer', function (Builder $customer) use ($search) {
+                                    $customer->where('full_name', 'like', "%{$search}%")
+                                        ->orWhere('email', 'like', "%{$search}%")
+                                        ->orWhere('phone', 'like', "%{$search}%");
+                                })
+                                ->orWhereHas('user', function (Builder $user) use ($search) {
+                                    $user->where('first_name', 'like', "%{$search}%")
+                                        ->orWhere('last_name', 'like', "%{$search}%")
+                                        ->orWhere('email', 'like', "%{$search}%");
+                                });
+                        });
+                });
+            });
+    }
+
+    private function profitabilityByBillingSubquery()
+    {
+        return DB::table('billing_items as bi')
+            ->leftJoin('products as products', 'products.product_id', '=', 'bi.product_id')
+            ->select('bi.billing_id')
+            ->selectRaw('COALESCE(SUM(COALESCE(bi.unit_selling_price, bi.unit_price, 0) * COALESCE(bi.quantity, 0)), 0) as gross_sales')
+            ->selectRaw('COALESCE(SUM(COALESCE(bi.unit_cost_price, products.cost_price, 0) * COALESCE(bi.quantity, 0)), 0) as cost_of_goods')
+            ->selectRaw('COALESCE(SUM((COALESCE(bi.unit_selling_price, bi.unit_price, 0) - COALESCE(bi.unit_cost_price, products.cost_price, 0)) * COALESCE(bi.quantity, 0)), 0) as gross_profit_total')
+            ->selectRaw('COALESCE(SUM(COALESCE(bi.quantity, 0)), 0) as units_sold')
+            ->groupBy('bi.billing_id');
+    }
+
+    private function buildLedgerSummary(Builder $filteredPayments, $profitabilityByBilling): array
+    {
+        $paymentSummary = (clone $filteredPayments)
+            ->selectRaw('COUNT(*) as filtered_count')
+            ->selectRaw('COALESCE(SUM(payments.amount_received), 0) as total_received')
+            ->selectRaw("COALESCE(SUM(CASE WHEN LOWER(payments.payment_method) = 'cash' THEN payments.amount_received ELSE 0 END), 0) as cash_total")
+            ->selectRaw("COALESCE(SUM(CASE WHEN LOWER(payments.payment_method) IN ('card', 'visa', 'mastercard', 'pos') THEN payments.amount_received ELSE 0 END), 0) as card_total")
+            ->selectRaw("COALESCE(SUM(CASE WHEN LOWER(payments.payment_method) IN ('mpesa', 'airtel_money', 'wallet', 'digital_wallet', 'bank') THEN payments.amount_received ELSE 0 END), 0) as digital_total")
+            ->first();
+
+        $filteredBillingIds = (clone $filteredPayments)
+            ->select('payments.billing_id')
+            ->distinct();
+
+        $profitabilitySummary = DB::query()
+            ->fromSub($profitabilityByBilling, 'billing_profit')
+            ->joinSub($filteredBillingIds, 'filtered_billings', function ($join) {
+                $join->on('filtered_billings.billing_id', '=', 'billing_profit.billing_id');
+            })
+            ->selectRaw('COUNT(*) as billed_transactions')
+            ->selectRaw('COALESCE(SUM(billing_profit.units_sold), 0) as units_sold')
+            ->selectRaw('COALESCE(SUM(billing_profit.gross_sales), 0) as gross_sales')
+            ->selectRaw('COALESCE(SUM(billing_profit.cost_of_goods), 0) as cost_of_goods')
+            ->selectRaw('COALESCE(SUM(billing_profit.gross_profit_total), 0) as gross_profit_total')
+            ->first();
+
+        $filteredCount = (int) ($paymentSummary->filtered_count ?? 0);
+        $totalReceived = round((float) ($paymentSummary->total_received ?? 0), 2);
+        $grossSales = round((float) ($profitabilitySummary->gross_sales ?? 0), 2);
+        $costOfGoods = round((float) ($profitabilitySummary->cost_of_goods ?? 0), 2);
+        $grossProfit = round((float) ($profitabilitySummary->gross_profit_total ?? 0), 2);
+
+        return [
+            'filtered_count' => $filteredCount,
+            'total_received' => $totalReceived,
+            'cash_total' => round((float) ($paymentSummary->cash_total ?? 0), 2),
+            'card_total' => round((float) ($paymentSummary->card_total ?? 0), 2),
+            'digital_total' => round((float) ($paymentSummary->digital_total ?? 0), 2),
+            'refunded_count' => 0,
+            'failed_count' => 0,
+            'average_ticket' => $filteredCount > 0 ? round($totalReceived / $filteredCount, 2) : 0,
+            'gross_sales' => $grossSales,
+            'cost_of_goods' => $costOfGoods,
+            'gross_profit_total' => $grossProfit,
+            'gross_margin_percent' => $grossSales > 0 ? round(($grossProfit / $grossSales) * 100, 2) : 0,
+            'units_sold' => (int) ($profitabilitySummary->units_sold ?? 0),
+            'billed_transactions' => (int) ($profitabilitySummary->billed_transactions ?? 0),
+        ];
     }
 }

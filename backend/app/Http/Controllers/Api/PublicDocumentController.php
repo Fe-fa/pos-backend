@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Billing;
 use Illuminate\Http\Response;
+use Barryvdh\DomPDF\Facade\Pdf;
 
 class PublicDocumentController extends Controller
 {
@@ -21,23 +22,21 @@ class PublicDocumentController extends Controller
             ]),
         ]);
     }
+public function download(string $mode, string $uuid): \Symfony\Component\HttpFoundation\Response
+{
+    [$billing, $payload] = $this->buildPayload($mode, $uuid);
 
-    public function download(string $mode, string $uuid): Response
-    {
-        [$billing, $payload] = $this->buildPayload($mode, $uuid);
+    $documentNumber = $payload['documentNumber'];
+    $fileName       = strtolower($mode) . '-' . preg_replace('/[^A-Za-z0-9\-_]/', '-', $documentNumber) . '.pdf';
 
-        $documentNumber = $payload['documentNumber'];
-        $fileName       = strtolower($mode) . '-' . preg_replace('/[^A-Za-z0-9\-_]/', '-', $documentNumber) . '.html';
+    $pdf = Pdf::loadView('public.billing-document-pdf', [
+        ...$payload,
+        'downloadMode' => true,
+        'downloadUrl'  => null,
+    ])->setPaper('a4', 'portrait');
 
-        return response()
-            ->view('public.billing-document', [
-                ...$payload,
-                'downloadMode' => true,
-                'downloadUrl'  => null,
-            ])
-            ->header('Content-Type', 'text/html; charset=UTF-8')
-            ->header('Content-Disposition', 'attachment; filename="' . $fileName . '"');
-    }
+    return $pdf->download($fileName);
+}
 
     private function buildPayload(string $mode, string $uuid): array
     {

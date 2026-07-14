@@ -11,10 +11,14 @@ use App\Services\AuthService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Password;
+use App\Services\AuditLogService;
 
 class AuthController extends Controller
 {
-    public function __construct(private readonly AuthService $authService) {}
+    public function __construct(
+        private readonly AuthService $authService,
+        private readonly AuditLogService $auditLogService
+    ) {}
 
     public function register(RegisterRequest $request): JsonResponse
     {

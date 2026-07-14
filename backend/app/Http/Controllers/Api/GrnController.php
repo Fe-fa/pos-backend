@@ -41,7 +41,7 @@ class GrnController extends Controller
     public function store(StoreGrnRequest $request): JsonResponse
     {
         return response()->json([
-            'message' => 'GRN draft created successfully.',
+            'message' => 'GRN draft saved successfully.',
             'data' => $this->service->createDraft($request->user(), $request->validated()),
         ], 201);
     }
@@ -49,7 +49,6 @@ class GrnController extends Controller
     public function show(Request $request, Grn $grn): JsonResponse
     {
         return response()->json([
-            'message' => 'GRN retrieved successfully.',
             'data' => $this->service->show($request->user(), $grn),
         ]);
     }
@@ -81,16 +80,13 @@ class GrnController extends Controller
     public function deleteItem(Request $request, Grn $grn, GrnItem $grnItem): JsonResponse
     {
         $this->service->deleteItem($request->user(), $grn, $grnItem);
-
-        return response()->json([
-            'message' => 'GRN item deleted successfully.',
-        ]);
+        return response()->json(['message' => 'GRN item deleted successfully.']);
     }
 
     public function charge(ChargeGrnRequest $request, Grn $grn): JsonResponse
     {
         return response()->json([
-            'message' => 'GRN payment recorded successfully.',
+            'message' => 'GRN payment recorded successfully against the payment voucher.',
             'data' => $this->service->charge($request->user(), $grn, $request->validated()),
         ]);
     }
@@ -106,9 +102,6 @@ class GrnController extends Controller
     public function destroy(Request $request, Grn $grn): JsonResponse
     {
         $this->service->deleteDraft($request->user(), $grn);
-
-        return response()->json([
-            'message' => 'GRN deleted successfully.',
-        ]);
+        return response()->json(['message' => 'GRN deleted successfully.']);
     }
 }

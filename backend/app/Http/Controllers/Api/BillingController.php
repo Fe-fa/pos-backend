@@ -10,6 +10,8 @@ use App\Models\Billing;
 use App\Services\BillingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Mail;
 
 class BillingController extends Controller
 {
@@ -152,6 +154,97 @@ if ($isSearchRequest) {
         return response()->json([
             'message' => 'Billing updated successfully.',
             'data'    => $this->service->updateHeader($billing, $request->validated()),
+        ]);
+    }
+
+    public function dispatchDocuments(Request $request, Billing $billing): JsonResponse
+    {
+        if ($error = $this->authorizePermission('payments.charge')) return $error;
+
+        $data = $request->validate([
+            'mode'  => ['nullable', 'in:receipt,invoice'],
+            'email' => ['nullable', 'email'],
+            'phone' => ['nullable', 'string', 'max:30'],
+        ]);
+
+        $billing = $this->service->show($billing);
+
+        $email = trim((string) ($data['email'] ?? ''));
+        $phone = trim((string) ($data['phone'] ?? ''));
+
+        if ($email === '' && $phone === '') {
+            return response()->json([
+                'message' => 'Provide an email address or phone number to dispatch the document.',
+            ], 422);
+        }
+
+        $mode = $data['mode'] ?? (((float) ($billing->balance_due ?? 0) <= 0) ? 'receipt' : 'invoice');
+        $viewUrl = route('public.documents.show', ['mode' => $mode, 'uuid' => $billing->uuid]);
+        $downloadUrl = route('public.documents.download', ['mode' => $mode, 'uuid' => $billing->uuid]);
+        $documentLabel = $mode === 'receipt' ? 'Sales Receipt' : 'Tax Invoice';
+        $storeName = $billing->store?->store_name ?: 'Your store';
+        $customerName = $billing->customer?->full_name ?: 'Customer';
+
+        $channels = [];
+        $channelErrors = [];
+
+        if ($email !== '') {
+            try {
+                Mail::html(
+                    "<p>Hello {$customerName},</p><p>Your {$documentLabel} from {$storeName} is ready.</p><p><a href=\"{$viewUrl}\">View online</a> | <a href=\"{$downloadUrl}\">Download copy</a></p>",
+                    function ($message) use ($email, $documentLabel, $storeName) {
+                        $message->to($email)->subject("{$documentLabel} from {$storeName}");
+                    }
+                );
+
+                $channels['email'] = 'sent';
+            } catch (\Throwable $exception) {
+                $channels['email'] = 'failed';
+                $channelErrors['email'] = $exception->getMessage();
+            }
+        }
+
+        if ($phone !== '') {
+            $webhook = config('services.whatsapp.receipts_webhook') ?: env('WHATSAPP_RECEIPTS_WEBHOOK');
+
+            if ($webhook) {
+                try {
+                    $response = Http::timeout(8)->acceptJson()->post($webhook, [
+                        'phone' => $phone,
+                        'message' => "{$documentLabel} from {$storeName}: {$viewUrl}",
+                        'document_url' => $downloadUrl,
+                        'view_url' => $viewUrl,
+                        'billing_id' => $billing->billing_id,
+                        'mode' => $mode,
+                    ]);
+
+                    if ($response->successful()) {
+                        $channels['whatsapp'] = 'queued';
+                    } else {
+                        $channels['whatsapp'] = 'failed';
+                        $channelErrors['whatsapp'] = $response->json('message')
+                            ?: trim((string) $response->body())
+                            ?: "WhatsApp webhook responded with HTTP {$response->status()}";
+                    }
+                } catch (\Throwable $exception) {
+                    $channels['whatsapp'] = 'failed';
+                    $channelErrors['whatsapp'] = $exception->getMessage();
+                }
+            } else {
+                $channels['whatsapp'] = 'not_configured';
+                $channelErrors['whatsapp'] = 'WHATSAPP_RECEIPTS_WEBHOOK is not configured.';
+            }
+        }
+
+        return response()->json([
+            'message' => 'Digital document dispatch processed successfully.',
+            'data' => [
+                'mode' => $mode,
+                'channels' => $channels,
+                'channel_errors' => $channelErrors,
+                'view_url' => $viewUrl,
+                'download_url' => $downloadUrl,
+            ],
         ]);
     }
 

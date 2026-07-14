@@ -3,21 +3,19 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\Mpesa\MpesaB2bService;
 use App\Services\Mpesa\MpesaService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
-/**
- * MpesaCallbackController — public endpoints hit by Safaricom.
- *
- * IMPORTANT: We ALWAYS return { ResultCode: 0, ResultDesc: "Accepted" } with
- * HTTP 200, even on internal errors. Otherwise Safaricom retries relentlessly.
- * Untrusted / malformed callbacks are ignored inside the try/catch.
- */
 class MpesaCallbackController extends Controller
 {
-    public function __construct(private readonly MpesaService $service) {}
+    public function __construct(
+        private readonly MpesaService $service,
+        private readonly MpesaB2bService $b2bService,
+    ) {
+    }
 
     public function stk(Request $request): JsonResponse
     {
@@ -63,6 +61,40 @@ class MpesaCallbackController extends Controller
             $this->service->handleC2bConfirmation($payload);
         } catch (\Throwable $e) {
             Log::error('[Mpesa] C2B confirmation error', ['error' => $e->getMessage()]);
+        }
+
+        return $this->ack();
+    }
+
+    public function b2bResult(Request $request): JsonResponse
+    {
+        if ($request->attributes->get('mpesa_untrusted')) {
+            return $this->ack();
+        }
+
+        try {
+            $payload = $request->all();
+            Log::info('[Mpesa][B2B] Result callback received', $payload);
+            $this->b2bService->handleResultCallback($payload);
+        } catch (\Throwable $e) {
+            Log::error('[Mpesa][B2B] Result callback error', ['error' => $e->getMessage()]);
+        }
+
+        return $this->ack();
+    }
+
+    public function b2bTimeout(Request $request): JsonResponse
+    {
+        if ($request->attributes->get('mpesa_untrusted')) {
+            return $this->ack();
+        }
+
+        try {
+            $payload = $request->all();
+            Log::warning('[Mpesa][B2B] Timeout callback received', $payload);
+            $this->b2bService->handleTimeoutCallback($payload);
+        } catch (\Throwable $e) {
+            Log::error('[Mpesa][B2B] Timeout callback error', ['error' => $e->getMessage()]);
         }
 
         return $this->ack();

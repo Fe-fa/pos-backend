@@ -6,17 +6,6 @@ use App\Models\Concerns\HasUuid;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-/**
- * MpesaTransaction — every M-Pesa attempt in a single, auditable ledger.
- *
- * Lifecycle:
- *   pending  → created locally, not yet sent to Daraja
- *   sent     → STK Push accepted, awaiting callback (or C2B accepted)
- *   success  → callback confirmed money received; linked Payment row created
- *   failed   → callback rejected (wrong PIN, insufficient funds, etc.)
- *   cancelled→ customer pressed cancel on their phone
- *   timeout  → no callback within the polling window
- */
 class MpesaTransaction extends Model
 {
     use HasUuid;
@@ -29,9 +18,11 @@ class MpesaTransaction extends Model
         'store_id',
         'billing_id',
         'grn_id',
+        'payment_voucher_id',
         'user_id',
         'channel',
         'shortcode_type',
+        'receiver_type',
         'idempotency_key',
         'merchant_request_id',
         'checkout_request_id',
@@ -40,6 +31,7 @@ class MpesaTransaction extends Model
         'originator_conversation_id',
         'amount',
         'phone_number',
+        'vendor_shortcode',
         'account_reference',
         'transaction_desc',
         'transaction_date',
@@ -53,8 +45,8 @@ class MpesaTransaction extends Model
     ];
 
     protected $casts = [
-        'amount'           => 'decimal:2',
-        'request_payload'  => 'array',
+        'amount' => 'decimal:2',
+        'request_payload' => 'array',
         'callback_payload' => 'array',
         'transaction_date' => 'datetime',
     ];
@@ -67,6 +59,11 @@ class MpesaTransaction extends Model
     public function grn(): BelongsTo
     {
         return $this->belongsTo(Grn::class, 'grn_id', 'grn_id');
+    }
+
+    public function paymentVoucher(): BelongsTo
+    {
+        return $this->belongsTo(PaymentVoucher::class, 'payment_voucher_id', 'payment_voucher_id');
     }
 
     public function payment(): BelongsTo

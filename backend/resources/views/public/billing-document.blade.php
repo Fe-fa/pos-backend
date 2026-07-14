@@ -1,3 +1,29 @@
+@php
+    /*
+     * Mirrors the receipt/invoice number, label, and title logic in
+     * print.js so this document always agrees with the thermal print,
+     * regardless of what the controller happens to pass in.
+     */
+    $isPaid = (float) ($billing->balance_due ?? 0) <= 0;
+
+    $documentNumber = $mode === 'invoice'
+        ? ($billing->invnumber
+            ?: ($payment->receiptnumber ?? null)
+            ?: ($billing->billing_id ? 'INV-' . $billing->billing_id : 'DRAFT'))
+        : ($isPaid
+            ? (($payment->receiptnumber ?? null)
+                ?: $billing->invnumber
+                ?: ($billing->billing_id ? 'RCT-' . $billing->billing_id : 'DRAFT'))
+            : ($billing->invnumber
+                ?: ($payment->receiptnumber ?? null)
+                ?: ($billing->billing_id ? 'INV-' . $billing->billing_id : 'DRAFT')));
+
+    $documentLabel = $mode === 'receipt' && $isPaid ? 'Receipt No' : 'Invoice No';
+
+    $documentTitle = $mode === 'invoice'
+        ? 'Tax Invoice'
+        : ($isPaid ? 'Sales Receipt' : 'Payment Receipt');
+@endphp
 <!doctype html>
 <html lang="en">
 <head>
@@ -6,13 +32,50 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
     <style>
+        /*
+         * Local token block so this standalone document renders correctly
+         * even if it's opened outside the main app bundle. Values are kept
+         * in sync with the app-wide :root in app.css — if you already load
+         * app.css on this page via <link>, this block is redundant but
+         * harmless (later app.css :root wins by source order/specificity
+         * only if loaded after this block).
+         */
+        :root {
+            --primary: #0E84C3;
+            --primary-strong: #0A6CA0;
+            --accent: #FA7316;
+            --accent-strong: #F96E14;
+
+            --bg: #eef2f5;
+            --bg-soft: #f7f8f9;
+            --panel: #ffffff;
+            --panel-2: #f8fafc;
+
+            --text: #1a1d20;
+            --text-strong: #111827;
+            --muted: #6b7280;
+
+            --line: #dbe3ea;
+            --line-strong: #cbd5e1;
+
+            --success: #218353;
+            --danger: #cf3a3a;
+            --warning: #d58c1f;
+
+            --shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
+            --shadow-soft: 0 6px 18px rgba(15, 23, 42, 0.05);
+
+            --radius: 18px;
+            --radius-sm: 12px;
+        }
+
         * { box-sizing: border-box; }
 
         body {
             margin: 0;
             font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background: #f4f6f8;
-            color: #15202b;
+            background: var(--bg);
+            color: var(--text);
         }
 
         .page {
@@ -35,31 +98,36 @@
             justify-content: center;
             padding: 10px 16px;
             border-radius: 10px;
-            border: 1px solid #d7dde3;
-            background: #fff;
-            color: #15202b;
+            border: 1px solid var(--line);
+            background: var(--panel);
+            color: var(--text);
             text-decoration: none;
             font-weight: 600;
             cursor: pointer;
         }
 
         .btn.primary {
-            background: #6d63d8;
-            border-color: #6d63d8;
+            background: var(--primary);
+            border-color: var(--primary);
             color: #fff;
         }
 
+        .btn.primary:hover {
+            background: var(--primary-strong);
+            border-color: var(--primary-strong);
+        }
+
         .sheet {
-            background: #fff;
-            border: 1px solid #dde3e8;
-            border-radius: 18px;
-            box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
             overflow: hidden;
         }
 
         .sheet-header {
             padding: 28px 28px 20px;
-            border-bottom: 1px solid #eef2f5;
+            border-bottom: 1px solid var(--line);
             display: grid;
             gap: 18px;
         }
@@ -82,7 +150,7 @@
         }
 
         .muted {
-            color: #667281;
+            color: var(--muted);
         }
 
         .doc-title {
@@ -90,12 +158,31 @@
             width: fit-content;
             padding: 8px 14px;
             border-radius: 999px;
-            background: #f3f0ff;
-            color: #584fc7;
+            background: color-mix(in srgb, var(--primary) 10%, white);
+            color: var(--primary-strong);
             font-size: 0.84rem;
             font-weight: 800;
             text-transform: uppercase;
             letter-spacing: 0.08em;
+        }
+
+        .status-pill {
+            display: inline-flex;
+            width: fit-content;
+            padding: 6px 12px;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 700;
+        }
+
+        .status-pill.is-paid {
+            background: color-mix(in srgb, var(--success) 14%, white);
+            color: var(--success);
+        }
+
+        .status-pill.is-unpaid {
+            background: color-mix(in srgb, var(--danger) 12%, white);
+            color: var(--danger);
         }
 
         .meta-grid {
@@ -105,16 +192,16 @@
         }
 
         .meta-box {
-            border: 1px solid #eef2f5;
-            border-radius: 12px;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
             padding: 14px;
-            background: #fafbfc;
+            background: var(--panel-2);
             display: grid;
             gap: 6px;
         }
 
         .meta-box span {
-            color: #667281;
+            color: var(--muted);
             font-size: 0.82rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
@@ -135,19 +222,19 @@
         }
 
         th {
-            background: #f5f7fa;
-            color: #425466;
+            background: var(--panel-2);
+            color: var(--muted);
             font-size: 0.78rem;
             letter-spacing: 0.06em;
             text-transform: uppercase;
             text-align: left;
             padding: 12px 14px;
-            border-bottom: 1px solid #e8edf2;
+            border-bottom: 1px solid var(--line);
         }
 
         td {
             padding: 14px;
-            border-bottom: 1px solid #eef2f5;
+            border-bottom: 1px solid var(--line);
             vertical-align: top;
         }
 
@@ -163,16 +250,16 @@
         }
 
         .summary-box {
-            border: 1px solid #eef2f5;
-            border-radius: 12px;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
             padding: 14px;
-            background: #fafbfc;
+            background: var(--panel-2);
             display: grid;
             gap: 6px;
         }
 
         .summary-box span {
-            color: #667281;
+            color: var(--muted);
             font-size: 0.8rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
@@ -184,20 +271,54 @@
         }
 
         .summary-box.total {
-            background: #f3f0ff;
-            border-color: #ddd6fe;
+            background: color-mix(in srgb, var(--primary) 8%, white);
+            border-color: color-mix(in srgb, var(--primary) 22%, white);
         }
 
         .summary-box.total strong {
-            color: #584fc7;
+            color: var(--primary-strong);
+        }
+
+        .summary-box.danger {
+            background: color-mix(in srgb, var(--danger) 8%, white);
+            border-color: color-mix(in srgb, var(--danger) 22%, white);
+        }
+
+        .summary-box.danger strong {
+            color: var(--danger);
+        }
+
+        .extra-info-list {
+            margin-top: 12px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .extra-info-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 10px 14px;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
+            background: var(--panel-2);
+            font-size: 0.9rem;
+        }
+
+        .extra-info-row span:first-child {
+            color: var(--muted);
+        }
+
+        .extra-info-row strong {
+            color: var(--text-strong);
         }
 
         .footer-note {
             margin-top: 18px;
             padding: 14px 16px;
-            border-radius: 12px;
-            background: #fafbfc;
-            border: 1px solid #eef2f5;
+            border-radius: var(--radius-sm);
+            background: var(--panel-2);
+            border: 1px solid var(--line);
             white-space: pre-line;
         }
 
@@ -237,6 +358,14 @@
     </style>
 </head>
 <body>
+    @php
+        $paidAmount = (float) ($billing->paid_amount ?? 0);
+        $balanceDue = (float) ($billing->balance_due ?? 0);
+        $pointsDiscount = (float) ($billing->points_discount ?? 0);
+        $changeReturned = $payment->change_returned ?? null;
+        $paymentMethod = $payment->payment_method ?? null;
+    @endphp
+
     <div class="page">
         <div class="toolbar">
             <button class="btn primary" onclick="window.print()">Print</button>
@@ -249,7 +378,14 @@
             <div class="sheet-header">
                 <div class="topline">
                     <div class="brand">
-                        <div class="doc-title">{{ $documentTitle }}</div>
+                        <div style="display:flex; align-items:center; gap:10px; flex-wrap: wrap;">
+                            <div class="doc-title">{{ $documentTitle }}</div>
+                            @if($mode === 'receipt')
+                                <span class="status-pill {{ $isPaid ? 'is-paid' : 'is-unpaid' }}">
+                                    {{ $isPaid ? 'Paid' : 'Balance Due' }}
+                                </span>
+                            @endif
+                        </div>
                         <h1>{{ $billing->store->store_name ?? 'Store' }}</h1>
 
                         @if(($settings['show_store_contacts_on_print'] ?? true) && !empty($billing->store->location))
@@ -282,7 +418,7 @@
 
                 <div class="meta-grid">
                     <div class="meta-box">
-                        <span>Number</span>
+                        <span>{{ $documentLabel }}</span>
                         <strong>{{ $documentNumber }}</strong>
                     </div>
 
@@ -342,13 +478,43 @@
 
                     <div class="summary-box">
                         <span>Paid</span>
-                        <strong>{{ $currencyCode }} {{ number_format((float) $billing->paid_amount, 2) }}</strong>
+                        <strong>{{ $currencyCode }} {{ number_format($paidAmount, 2) }}</strong>
                     </div>
 
                     <div class="summary-box total">
                         <span>Total</span>
                         <strong>{{ $currencyCode }} {{ number_format((float) $billing->total, 2) }}</strong>
                     </div>
+                </div>
+
+                <div class="extra-info-list">
+                    @if($pointsDiscount > 0)
+                        <div class="extra-info-row">
+                            <span>Points Discount</span>
+                            <strong>- {{ $currencyCode }} {{ number_format($pointsDiscount, 2) }}</strong>
+                        </div>
+                    @endif
+
+                    @if($paymentMethod && ($settings['show_payment_method_on_print'] ?? true))
+                        <div class="extra-info-row">
+                            <span>Payment Method</span>
+                            <strong>{{ strtoupper($paymentMethod) }}</strong>
+                        </div>
+                    @endif
+
+                    @if($balanceDue > 0)
+                        <div class="extra-info-row" style="border-color: color-mix(in srgb, var(--danger) 30%, var(--line)); background: color-mix(in srgb, var(--danger) 6%, white);">
+                            <span>Balance Due</span>
+                            <strong style="color: var(--danger);">{{ $currencyCode }} {{ number_format($balanceDue, 2) }}</strong>
+                        </div>
+                    @endif
+
+                    @if($changeReturned)
+                        <div class="extra-info-row">
+                            <span>Change</span>
+                            <strong>{{ $currencyCode }} {{ number_format((float) $changeReturned, 2) }}</strong>
+                        </div>
+                    @endif
                 </div>
 
                 @if(($settings['show_vat_summary'] ?? true) && count($vatSummary))

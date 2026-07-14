@@ -15,14 +15,15 @@ class ChargeGrnRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'payment_method' => ['required', Rule::in(['cash', 'mpesa', 'card', 'bank_transfer'])],
+            'payment_voucher_id' => ['required', 'integer', 'exists:payment_vouchers,payment_voucher_id'],
+            'payment_method' => ['required', Rule::in(['cash', 'mpesa', 'card', 'bank_transfer', 'cheque'])],
             'amount_received' => ['required', 'numeric', 'min:0.01'],
             'amount_tendered' => ['nullable', 'numeric', 'min:0'],
             'mpesa_phone' => ['nullable', 'required_if:payment_method,mpesa', 'string', 'max:30'],
             'mpesa_code' => ['nullable', 'required_if:payment_method,mpesa', 'string', 'max:100'],
             'card_reference' => ['nullable', 'required_if:payment_method,card', 'string', 'max:100'],
             'card_holder' => ['nullable', 'required_if:payment_method,card', 'string', 'max:150'],
-            'bank_reference' => ['nullable', 'required_if:payment_method,bank_transfer', 'string', 'max:120'],
+            'bank_reference' => ['nullable', 'required_if:payment_method,bank_transfer,cheque', 'string', 'max:120'],
             'notes' => ['nullable', 'string'],
         ];
     }

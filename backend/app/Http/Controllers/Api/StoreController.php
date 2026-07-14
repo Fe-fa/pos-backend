@@ -45,7 +45,7 @@ class StoreController extends Controller
         if ($error = $this->authorizePermission('stores.view')) return $error;
 
         $user = $request->user();
-        $perPage = max(1, min((int) $request->get('per_page', 2), 100));
+        $perPage = max(1, min((int) $request->get('per_page', 10), 100));
 
         $query = Store::query()->withCount('assignedUsers');
 

@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Supplier extends Model
@@ -23,44 +24,58 @@ class Supplier extends Model
         'email',
         'address',
         'opening_balance',
+        'current_balance',
+        'credit_days',
         'outstanding_balance',
     ];
 
     protected $casts = [
         'is_active' => 'boolean',
         'opening_balance' => 'float',
+        'current_balance' => 'float',
         'outstanding_balance' => 'float',
+        'credit_days' => 'integer',
     ];
 
-    protected $appends = ['total_invoiced', 'total_paid', 'balance'];
+    protected $appends = ['balance'];
 
-    /** All GRNs raised against this supplier. */
-    public function grns()
+    public function grns(): HasMany
     {
         return $this->hasMany(Grn::class, 'supplier_id', 'supplier_id');
     }
 
-    /** Only posted GRNs count toward the ledger — drafts aren't committed yet. */
-    public function postedGrns()
+    public function postedGrns(): HasMany
     {
         return $this->grns()->where('status', 'completed');
     }
 
-    public function getTotalInvoicedAttribute(): float
+    public function purchaseOrders(): HasMany
     {
-        return (float) ($this->attributes['total_invoiced'] ?? $this->postedGrns()->sum('final_total'));
+        return $this->hasMany(PurchaseOrder::class, 'supplier_id', 'supplier_id');
     }
 
-    public function getTotalPaidAttribute(): float
+    public function ledgerEntries(): HasMany
     {
-        return (float) ($this->attributes['total_paid'] ?? $this->postedGrns()->sum('paid_amount'));
+        return $this->hasMany(SupplierLedgerEntry::class, 'supplier_id', 'supplier_id')
+            ->orderByDesc('supplier_ledger_entry_id');
     }
 
-    /**
-     * Positive = we owe the supplier. Negative = supplier owes us (overpaid/credit).
-     */
+    public function refreshCurrentBalance(): float
+    {
+        $debits = (float) $this->ledgerEntries()->where('direction', 'debit')->sum('amount');
+        $credits = (float) $this->ledgerEntries()->where('direction', 'credit')->sum('amount');
+        $balance = round((float) $this->opening_balance + $debits - $credits, 2);
+
+        $this->forceFill([
+            'current_balance' => $balance,
+            'outstanding_balance' => $balance,
+        ])->save();
+
+        return $balance;
+    }
+
     public function getBalanceAttribute(): float
     {
-        return round((float) $this->opening_balance + $this->total_invoiced - $this->total_paid, 2);
+        return round((float) ($this->current_balance ?? $this->outstanding_balance ?? $this->opening_balance), 2);
     }
 }

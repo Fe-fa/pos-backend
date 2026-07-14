@@ -20,9 +20,11 @@ class Grn extends Model
         'store_id',
         'user_id',
         'supplier_id',
+        'purchase_order_id',
         'grn_number',
         'invoice_number',
         'invoice_date',
+        'invoice_reference_total',
         'grn_date',
         'supplier_name',
         'is_po_available',
@@ -45,10 +47,12 @@ class Grn extends Model
         'notes',
         'completed_at',
         'stock_applied_at',
+        'po_reconciled_at',
     ];
 
     protected $casts = [
         'invoice_date' => 'date',
+        'invoice_reference_total' => 'decimal:2',
         'grn_date' => 'date',
         'is_po_available' => 'boolean',
         'release_to_inventory' => 'boolean',
@@ -66,6 +70,7 @@ class Grn extends Model
         'last_payment_at' => 'datetime',
         'completed_at' => 'datetime',
         'stock_applied_at' => 'datetime',
+        'po_reconciled_at' => 'datetime',
         'deleted_at' => 'datetime',
     ];
 
@@ -84,6 +89,11 @@ class Grn extends Model
         return $this->belongsTo(Supplier::class, 'supplier_id', 'supplier_id');
     }
 
+    public function purchaseOrder(): BelongsTo
+    {
+        return $this->belongsTo(PurchaseOrder::class, 'purchase_order_id', 'purchase_order_id');
+    }
+
     public function items(): HasMany
     {
         return $this->hasMany(GrnItem::class, 'grn_id', 'grn_id')
@@ -95,6 +105,17 @@ class Grn extends Model
     {
         return $this->hasMany(GrnPayment::class, 'grn_id', 'grn_id')
             ->orderByDesc('grn_payment_id');
+    }
+
+    public function paymentVouchers(): HasMany
+    {
+        return $this->hasMany(PaymentVoucher::class, 'grn_id', 'grn_id')
+            ->orderByDesc('payment_voucher_id');
+    }
+
+    public function ledgerEntries(): HasMany
+    {
+        return $this->hasMany(SupplierLedgerEntry::class, 'grn_id', 'grn_id');
     }
 
     public function getRouteKeyName(): string

@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\CategoryController;
 use App\Http\Controllers\Api\CustomerController;
 use App\Http\Controllers\Api\InventoryController;
 use App\Http\Controllers\Api\PaymentController;
+use App\Http\Controllers\Api\PaymentVoucherController;
 use App\Http\Controllers\Api\ProductController;
 use App\Http\Controllers\Api\StoreController;
 use App\Http\Controllers\Api\UserController;
@@ -22,6 +23,7 @@ use App\Http\Controllers\Api\ManagerDashboardController;
 use App\Http\Controllers\Api\PosSessionController;
 use App\Http\Controllers\Api\CashierShiftController;
 use App\Http\Controllers\Api\SupplierController;
+use App\Http\Controllers\Api\PurchaseOrderController;
 use App\Http\Controllers\Api\MpesaController;
 use App\Http\Controllers\Api\MpesaCallbackController;
 
@@ -78,6 +80,8 @@ Route::middleware('auth:sanctum')->group(function () {
     // Manual receipt entry
     Route::post('/validate-receipt',             [MpesaController::class, 'validateReceipt']);
   });
+      Route::post('/mpesa/b2b/supplier-payment', [MpesaController::class, 'initiateB2bSupplierPayment']);
+    Route::get('/mpesa/b2b/status/{trackingReference}', [MpesaController::class, 'b2bStatus']);
 
     
 
@@ -105,7 +109,14 @@ Route::prefix('access-control')->group(function () {
     Route::apiResource('categories', CategoryController::class);
     Route::apiResource('products', ProductController::class);
     Route::apiResource('suppliers', SupplierController::class);
+    Route::get('suppliers/{supplier}/statement', [SupplierController::class, 'statement']);
 
+    Route::get('purchase-orders', [PurchaseOrderController::class, 'index']);
+    Route::post('purchase-orders', [PurchaseOrderController::class, 'store']);
+    Route::get('purchase-orders/{purchaseOrder}', [PurchaseOrderController::class, 'show']);
+    Route::put('purchase-orders/{purchaseOrder}', [PurchaseOrderController::class, 'update']);
+    Route::delete('purchase-orders/{purchaseOrder}', [PurchaseOrderController::class, 'destroy']);
+    Route::post('purchase-orders/{purchaseOrder}/place', [PurchaseOrderController::class, 'place']);
 
     Route::get('inventory/history', [InventoryController::class, 'history'])->name('inventory.history');
     Route::post('inventory/consume-fifo', [InventoryController::class, 'consumeFifo'])->name('inventory.consume-fifo');
@@ -126,6 +137,7 @@ Route::prefix('access-control')->group(function () {
 
     Route::post('billings/charge', [PaymentController::class, 'chargeCart'])->name('billings.charge.cart');
     Route::post('billings/{billing}/charge', [PaymentController::class, 'charge'])->name('billings.charge');
+    Route::post('billings/{billing}/dispatch-documents', [BillingController::class, 'dispatchDocuments'])->name('billings.dispatch-documents');
 
         Route::prefix('reward-rules')->group(function () {
         Route::get('/',                 [RewardRuleController::class, 'index']);
@@ -152,6 +164,11 @@ Route::prefix('dashboard/manager')->group(function () {
 
         Route::get('payments', [PaymentController::class, 'index'])->name('payments.index');
       Route::get('payments/{payment:payment_id}', [PaymentController::class, 'show']);
+
+        Route::get('payment-vouchers', [PaymentVoucherController::class, 'index'])->name('payment-vouchers.index');
+        Route::post('payment-vouchers', [PaymentVoucherController::class, 'store'])->name('payment-vouchers.store');
+        Route::get('payment-vouchers/{paymentVoucher:payment_voucher_id}', [PaymentVoucherController::class, 'show'])->name('payment-vouchers.show');
+        Route::put('payment-vouchers/{paymentVoucher:payment_voucher_id}', [PaymentVoucherController::class, 'update'])->name('payment-vouchers.update');
 });
 
 Route::get('public/documents/{mode}/{uuid}', [PublicDocumentController::class, 'show'])
@@ -161,8 +178,7 @@ Route::get('public/documents/{mode}/{uuid}', [PublicDocumentController::class, '
 Route::get('public/documents/{mode}/{uuid}/download', [PublicDocumentController::class, 'download'])
     ->where('mode', 'receipt|invoice')
     ->name('public.documents.download');
-
-    Route::prefix('mpesa/callbacks')
+Route::prefix('mpesa/callbacks')
     ->middleware('mpesa.callback')
     ->group(function () {
         Route::post('/stk',                    [MpesaCallbackController::class, 'stk']);
@@ -170,4 +186,11 @@ Route::get('public/documents/{mode}/{uuid}/download', [PublicDocumentController:
         Route::post('/c2b/confirmation',       [MpesaCallbackController::class, 'c2bConfirmation']);
         Route::post('/tx-status/result',       [MpesaCallbackController::class, 'txStatusResult']);
         Route::post('/tx-status/timeout',      [MpesaCallbackController::class, 'txStatusTimeout']);
+    });
+
+Route::prefix('webhooks/mpesa/b2b')
+    ->middleware('mpesa.callback')
+    ->group(function () {
+        Route::post('/result',  [MpesaCallbackController::class, 'b2bResult']);
+        Route::post('/timeout', [MpesaCallbackController::class, 'b2bTimeout']);
     });

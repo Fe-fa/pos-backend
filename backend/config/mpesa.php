@@ -50,11 +50,15 @@ return [
 
     // Paths appended to callback_base_url (must match your api.php routes).
     'callback_paths' => [
-        'stk'              => '/api/mpesa/callbacks/stk',
-        'c2b_validation'   => '/api/mpesa/callbacks/c2b/validation',
-        'c2b_confirmation' => '/api/mpesa/callbacks/c2b/confirmation',
-        'tx_status_result' => '/api/mpesa/callbacks/tx-status/result',
-        'tx_status_timeout'=> '/api/mpesa/callbacks/tx-status/timeout',
+        'stk'               => '/api/mpesa/callbacks/stk',
+        'c2b_validation'    => '/api/mpesa/callbacks/c2b/validation',
+        'c2b_confirmation'  => '/api/mpesa/callbacks/c2b/confirmation',
+        'tx_status_result'  => '/api/mpesa/callbacks/tx-status/result',
+        'tx_status_timeout' => '/api/mpesa/callbacks/tx-status/timeout',
+
+        // B2B (supplier settlement) callbacks
+        'b2b_result'        => '/api/webhooks/mpesa/b2b/result',
+        'b2b_timeout'       => '/api/webhooks/mpesa/b2b/timeout',
     ],
 
     // C2B response type when validation URL is unreachable: Cancelled|Completed
@@ -81,4 +85,32 @@ return [
     // Whitelisted Safaricom IP ranges for callback firewalling (optional).
     // If empty, IP filter is skipped. Enable in production for defense-in-depth.
     'callback_ip_whitelist' => array_filter(explode(',', (string) env('MPESA_CALLBACK_IP_WHITELIST', ''))),
+
+    /*
+    |--------------------------------------------------------------------
+    | B2B (Business-to-Business) — supplier settlement via Daraja B2B
+    |--------------------------------------------------------------------
+    | Used for paying suppliers directly from your business shortcode,
+    | e.g. from GrnPaymentModal's "M-Pesa B2B" payment method.
+    */
+    'b2b' => [
+        'consumer_key'        => env('MPESA_B2B_CONSUMER_KEY') ?: env('MPESA_CONSUMER_KEY'),
+        'consumer_secret'     => env('MPESA_B2B_CONSUMER_SECRET') ?: env('MPESA_CONSUMER_SECRET'),
+        'initiator_name'      => env('MPESA_B2B_INITIATOR_NAME'),
+        'initiator_password'  => env('MPESA_B2B_INITIATOR_PASSWORD'),
+        'sender_shortcode'    => env('MPESA_B2B_SENDER_SHORTCODE') ?: env('MPESA_SHORTCODE'),
+        // Pre-generated via Daraja portal → Test Credentials → "Generate
+        // Security Credential Value". When set, MpesaB2bService uses this
+        // directly instead of encrypting initiator_password locally with
+        // certificate_path. Intended for sandbox; leave blank in production.
+        'security_credential' => env('MPESA_B2B_SECURITY_CREDENTIAL'),
+        'certificate_path'    => env(
+            'MPESA_B2B_CERTIFICATE_PATH',
+            storage_path(
+                env('MPESA_ENVIRONMENT', 'sandbox') === 'live'
+                    ? 'app/mpesa/ProductionCertificate.cer'
+                    : 'app/mpesa/SandboxCertificate.cer'
+            )
+        ),
+    ],
 ];

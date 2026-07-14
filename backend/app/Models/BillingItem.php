@@ -20,6 +20,8 @@ class BillingItem extends Model
         'product_id',
         'quantity',
         'unit_price',
+        'unit_selling_price',
+        'unit_cost_price',
         'line_subtotal',
         'vat_rate',
         'vat_amount',
@@ -29,6 +31,8 @@ class BillingItem extends Model
     protected $casts = [
         'quantity' => 'integer',
         'unit_price' => 'decimal:2',
+        'unit_selling_price' => 'decimal:2',
+        'unit_cost_price' => 'decimal:2',
         'line_subtotal' => 'decimal:2',
         'vat_rate' => 'decimal:2',
         'vat_amount' => 'decimal:2',

@@ -173,14 +173,26 @@ class ProductController extends Controller
         ]);
     }
 
-    public function destroy(Request $request, Product $product): JsonResponse
-    {
-        if ($error = $this->authorizePermission('products.manage')) return $error;
+public function destroy(Request $request, Product $product): JsonResponse
+{
+    if ($error = $this->authorizePermission('products.manage')) return $error;
 
+    try {
         $this->service->delete($request->user(), $product);
 
         return response()->json([
             'message' => 'Product deleted successfully.',
         ]);
+    } catch (\Illuminate\Database\QueryException $e) {
+        if ($e->getCode() === '23000') {
+            return response()->json([
+                'message' => 'This product cannot be deleted because it has existing billing records. Consider deactivating it instead.',
+            ], 409);
+        }
+
+        return response()->json([
+            'message' => 'Something went wrong while deleting the product.',
+        ], 500);
     }
+}
 }

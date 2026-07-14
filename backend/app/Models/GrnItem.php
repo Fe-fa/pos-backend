@@ -17,6 +17,7 @@ class GrnItem extends Model
     protected $fillable = [
         'uuid',
         'grn_id',
+        'po_item_id',
         'product_id',
         'product_name_snapshot',
         'barcode',
@@ -24,7 +25,10 @@ class GrnItem extends Model
         'item_type',
         'batch_no',
         'expiry_date',
+        'quantity_expected',
         'qty_received',
+        'quantity_accepted',
+        'quantity_rejected',
         'free_qty',
         'cost_price_excl_tax',
         'tax_rate',
@@ -53,7 +57,10 @@ class GrnItem extends Model
 
     protected $casts = [
         'expiry_date' => 'date',
+        'quantity_expected' => 'integer',
         'qty_received' => 'integer',
+        'quantity_accepted' => 'integer',
+        'quantity_rejected' => 'integer',
         'free_qty' => 'integer',
         'cost_price_excl_tax' => 'decimal:2',
         'tax_rate' => 'decimal:2',
@@ -82,6 +89,11 @@ class GrnItem extends Model
     public function product(): BelongsTo
     {
         return $this->belongsTo(Product::class, 'product_id', 'product_id');
+    }
+
+    public function purchaseOrderItem(): BelongsTo
+    {
+        return $this->belongsTo(PurchaseOrderItem::class, 'po_item_id', 'purchase_order_item_id');
     }
 
     public function getRouteKeyName(): string
