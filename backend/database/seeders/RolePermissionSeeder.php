@@ -71,6 +71,13 @@ class RolePermissionSeeder extends Seeder
             'pos.refund',
             'pos.discount',
             'pos.price_override',
+
+            // ── M-Pesa ────────────────────────────────────────────────
+'mpesa.initiate',
+'mpesa.view',
+'mpesa.cancel',
+'mpesa.validate',
+'mpesa.b2b.initiate',
         ];
 
         // ── Admin: everything ─────────────────────────────────────────
@@ -127,6 +134,13 @@ class RolePermissionSeeder extends Seeder
             'pos.refund',
             'pos.discount',
             'pos.price_override',
+
+            // M-Pesa
+'mpesa.initiate',
+'mpesa.view',
+'mpesa.cancel',
+'mpesa.validate',
+'mpesa.b2b.initiate',
         ];
 
         // ── Cashier: counter-only, view-first, limited manage ─────────
@@ -150,6 +164,11 @@ class RolePermissionSeeder extends Seeder
             // POS
             'pos.access',
             'pos.draft',
+
+            // M-Pesa
+'mpesa.initiate',
+'mpesa.view',
+'mpesa.validate',
         ];
 
         foreach ($allPermissions as $permission) {

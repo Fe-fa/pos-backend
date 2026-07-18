@@ -42,6 +42,10 @@ class PaymentVoucher extends Model
         'authorized_date',
         'line_items',
         'notes',
+        'receipt_number',
+        'receipt_generated_at',
+        'receipt_generated_by_user_id',
+        'receipt_payment_breakdown',
     ];
 
     protected $casts = [
@@ -52,6 +56,8 @@ class PaymentVoucher extends Model
         'paid_amount' => 'decimal:2',
         'balance_due' => 'decimal:2',
         'line_items' => 'array',
+        'receipt_generated_at' => 'datetime',
+        'receipt_payment_breakdown' => 'array',
         'deleted_at' => 'datetime',
     ];
 
@@ -85,10 +91,23 @@ class PaymentVoucher extends Model
         return $this->belongsTo(User::class, 'approved_by_user_id', 'user_id');
     }
 
+    public function receiptGeneratedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'receipt_generated_by_user_id', 'user_id');
+    }
+
     public function payments(): HasMany
     {
         return $this->hasMany(GrnPayment::class, 'payment_voucher_id', 'payment_voucher_id')
             ->orderByDesc('grn_payment_id');
+    }
+
+    public function settledPayments(): HasMany
+    {
+        return $this->hasMany(GrnPayment::class, 'payment_voucher_id', 'payment_voucher_id')
+            ->whereIn('status', ['completed', 'posted'])
+            ->orderBy('paid_at')
+            ->orderBy('grn_payment_id');
     }
 
     public function getRouteKeyName(): string

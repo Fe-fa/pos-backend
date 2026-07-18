@@ -206,6 +206,43 @@ class DarajaClient
         return $response->json() ?? [];
     }
 
+    public function registerPullTransactions(
+        string $nominatedNumber,
+        string $callbackUrl,
+        string $requestType = 'Pull'
+    ): array {
+        $response = $this->authedRequest()->post($this->endpoint('pull_register'), [
+            'ShortCode'       => $this->creds['shortcode'],
+            'RequestType'     => $requestType,
+            'NominatedNumber' => self::normalisePhone($nominatedNumber),
+            'CallBackURL'     => $callbackUrl,
+        ]);
+
+        $this->logIfDebug('pull_register', ['res' => $response->json()]);
+
+        return $response->json() ?? [];
+    }
+
+    public function pullTransactions(string $startDate, string $endDate, int $offset = 0): array
+    {
+        $response = $this->authedRequest()->post($this->endpoint('pull_query'), [
+            'ShortCode'    => $this->creds['shortcode'],
+            'StartDate'    => $startDate,
+            'EndDate'      => $endDate,
+            'OffSetValue'  => (string) max(0, $offset),
+        ]);
+
+        $this->logIfDebug('pull_query', [
+            'shortcode' => $this->creds['shortcode'],
+            'start' => $startDate,
+            'end' => $endDate,
+            'offset' => $offset,
+            'res' => $response->json(),
+        ]);
+
+        return $response->json() ?? [];
+    }
+
     // ─────────────────────────────────────────────────────────────
     //  Internal helpers
     // ─────────────────────────────────────────────────────────────

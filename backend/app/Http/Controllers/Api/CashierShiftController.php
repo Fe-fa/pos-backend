@@ -13,14 +13,10 @@ class CashierShiftController extends Controller
     {
     }
 
-    /**
-     * GET /cashier-shifts/today
-     * Returns the current cashier's shift status (no live cash counters).
-     */
     public function today(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'store_id'      => ['required', 'integer'],
+            'store_id' => ['required', 'integer'],
             'business_date' => ['nullable', 'date'],
         ]);
 
@@ -33,23 +29,18 @@ class CashierShiftController extends Controller
         ]);
     }
 
-    /**
-     * POST /cashier-shifts/open
-     * Opens a new shift with opening balance + optional note.
-     * Carry-forward variance from previous day is auto-applied.
-     */
     public function open(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'store_id'        => ['required', 'integer'],
-            'business_date'   => ['nullable', 'date'],
+            'store_id' => ['required', 'integer'],
+            'business_date' => ['nullable', 'date'],
             'opening_balance' => ['required', 'numeric', 'min:0'],
-            'opening_note'    => ['nullable', 'string', 'max:500'],
+            'opening_note' => ['nullable', 'string', 'max:500'],
         ]);
 
         return response()->json([
             'message' => 'Cashier shift opened successfully.',
-            'data'    => $this->cashierShiftService->openShift(
+            'data' => $this->cashierShiftService->openShift(
                 $request->user(),
                 (int) $validated['store_id'],
                 (float) $validated['opening_balance'],
@@ -59,24 +50,19 @@ class CashierShiftController extends Controller
         ], 201);
     }
 
-    /**
-     * POST /cashier-shifts/close
-     * Closes a cashier shift with drawer reconciliation.
-     * Cashier can close own shift; manager/admin can close any.
-     */
     public function close(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'store_id'         => ['required', 'integer'],
-            'business_date'    => ['nullable', 'date'],
-            'cashier_user_id'  => ['nullable', 'integer'],
-            'counted_cash'     => ['nullable', 'numeric', 'min:0'],
-            'close_note'       => ['nullable', 'string', 'max:500'],
+            'store_id' => ['required', 'integer'],
+            'business_date' => ['nullable', 'date'],
+            'cashier_user_id' => ['nullable', 'integer'],
+            'counted_cash' => ['nullable', 'numeric', 'min:0'],
+            'close_note' => ['nullable', 'string', 'max:500'],
         ]);
 
         return response()->json([
             'message' => 'Cashier shift closed successfully.',
-            'data'    => $this->cashierShiftService->closeShift(
+            'data' => $this->cashierShiftService->closeShift(
                 $request->user(),
                 (int) $validated['store_id'],
                 isset($validated['cashier_user_id']) ? (int) $validated['cashier_user_id'] : null,
@@ -87,21 +73,15 @@ class CashierShiftController extends Controller
         ]);
     }
 
-    /**
-     * GET /cashier-shifts/daily-sales
-     * Returns a full daily sales report for a single cashier.
-     * Used by the "Daily Sales" modal on the cashier POS page.
-     */
     public function dailySales(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'store_id'        => ['required', 'integer'],
+            'store_id' => ['required', 'integer'],
             'cashier_user_id' => ['nullable', 'integer'],
-            'business_date'   => ['nullable', 'date'],
+            'business_date' => ['nullable', 'date'],
         ]);
 
-        $cashierUserId = $validated['cashier_user_id']
-            ?? $request->user()->user_id;
+        $cashierUserId = $validated['cashier_user_id'] ?? $request->user()->user_id;
 
         return response()->json([
             'data' => $this->cashierShiftService->getCashierDailySales(
@@ -113,20 +93,14 @@ class CashierShiftController extends Controller
         ]);
     }
 
-    /**
-     * GET /cashier-shifts/all-cashiers
-     * Returns daily sales for ALL cashiers in a store.
-     * Manager/admin only. Used by the "All Cashiers Daily Sales" modal.
-     */
     public function allCashiers(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'store_id'      => ['required', 'integer'],
+            'store_id' => ['required', 'integer'],
             'business_date' => ['nullable', 'date'],
         ]);
 
         $user = $request->user();
-
         if (!$user->isAdmin() && !$user->isManager()) {
             abort(403, 'Only managers and admins can view all cashiers report.');
         }
@@ -136,19 +110,13 @@ class CashierShiftController extends Controller
             $validated['business_date'] ?? null,
         );
 
-        return response()->json([
-            'data' => $payload,
-        ]);
+        return response()->json(['data' => $payload]);
     }
 
-    /**
-     * GET /cashier-shifts/report
-     * Legacy report endpoint — returns scoped daily summary.
-     */
     public function report(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'store_id'      => ['required', 'integer'],
+            'store_id' => ['required', 'integer'],
             'business_date' => ['nullable', 'date'],
         ]);
 
@@ -158,13 +126,34 @@ class CashierShiftController extends Controller
             $validated['business_date'] ?? null,
         );
 
-        $payload = $this->cashierShiftService->buildScopedDailySummary(
-            [(int) $validated['store_id']],
-            $validated['business_date'] ?? null,
-        );
+        return response()->json([
+            'data' => $this->cashierShiftService->buildScopedDailySummary(
+                [(int) $validated['store_id']],
+                $validated['business_date'] ?? null,
+            ),
+        ]);
+    }
+
+    public function cashDrop(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'store_id' => ['required', 'integer'],
+            'cashier_user_id' => ['nullable', 'integer'],
+            'business_date' => ['nullable', 'date'],
+            'amount' => ['required', 'numeric', 'gt:0'],
+            'note' => ['nullable', 'string', 'max:1000'],
+        ]);
 
         return response()->json([
-            'data' => $payload,
-        ]);
+            'message' => 'Cash drop recorded successfully.',
+            'data' => $this->cashierShiftService->recordCashDrop(
+                $request->user(),
+                (int) $validated['store_id'],
+                (float) $validated['amount'],
+                $validated['note'] ?? null,
+                isset($validated['cashier_user_id']) ? (int) $validated['cashier_user_id'] : null,
+                $validated['business_date'] ?? null,
+            ),
+        ], 201);
     }
 }

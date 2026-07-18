@@ -25,7 +25,9 @@ use App\Http\Controllers\Api\CashierShiftController;
 use App\Http\Controllers\Api\SupplierController;
 use App\Http\Controllers\Api\PurchaseOrderController;
 use App\Http\Controllers\Api\MpesaController;
+use App\Http\Controllers\Api\MpesaRealtimePaymentController;
 use App\Http\Controllers\Api\MpesaCallbackController;
+use App\Http\Controllers\Api\TransactionDeskController;
 
 
 
@@ -71,6 +73,14 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/grns/{grn}/charge', [GrnController::class, 'charge']);
 
     Route::prefix('mpesa')->group(function () {
+    Route::post('/register-c2b-urls', [MpesaRealtimePaymentController::class, 'registerUrls']);
+    Route::prefix('/realtime')->group(function () {
+        Route::post('/attempts', [MpesaRealtimePaymentController::class, 'startWaitingAttempt']);
+        Route::post('/attempts/{attempt}/cancel', [MpesaRealtimePaymentController::class, 'cancelWaitingAttempt']);
+        Route::post('/transactions/{transaction}/claim', [MpesaRealtimePaymentController::class, 'claimPayment']);
+        Route::get('/unassigned', [MpesaRealtimePaymentController::class, 'unassignedIndex']);
+        Route::post('/unassigned/{unassigned}/apply', [MpesaRealtimePaymentController::class, 'applyUnassigned']);
+    });
     // Push STK to customer's phone
     Route::post('/stk-push',                     [MpesaController::class, 'initiateStkPush']);
     // Poll status while modal is open
@@ -79,11 +89,19 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/cancel/{checkoutRequestId}',   [MpesaController::class, 'cancel']);
     // Manual receipt entry
     Route::post('/validate-receipt',             [MpesaController::class, 'validateReceipt']);
+    // Poll async manual receipt validation
+    Route::get('/manual-status/{trackingReference}', [MpesaController::class, 'manualStatus']);
+    // Find a recent customer-initiated C2B payment from phone + amount
+    Route::post('/pull-match',                   [MpesaController::class, 'pullMatch']);
+
+    
   });
       Route::post('/mpesa/b2b/supplier-payment', [MpesaController::class, 'initiateB2bSupplierPayment']);
     Route::get('/mpesa/b2b/status/{trackingReference}', [MpesaController::class, 'b2bStatus']);
 
-    
+    Route::get('/transaction-desk', [TransactionDeskController::class, 'index']);
+    Route::post('/transaction-desk/expenses', [TransactionDeskController::class, 'storeExpense']);
+    Route::post('/cashier-shifts/cash-drop', [CashierShiftController::class, 'cashDrop']);
 
 Route::prefix('access-control')->group(function () {
     Route::get('/', [AccessControlController::class, 'index']);
@@ -169,6 +187,8 @@ Route::prefix('dashboard/manager')->group(function () {
         Route::post('payment-vouchers', [PaymentVoucherController::class, 'store'])->name('payment-vouchers.store');
         Route::get('payment-vouchers/{paymentVoucher:payment_voucher_id}', [PaymentVoucherController::class, 'show'])->name('payment-vouchers.show');
         Route::put('payment-vouchers/{paymentVoucher:payment_voucher_id}', [PaymentVoucherController::class, 'update'])->name('payment-vouchers.update');
+        Route::post('payment-vouchers/{paymentVoucher}/generate-receipt', [PaymentVoucherController::class, 'generateReceipt']);
+
 });
 
 Route::get('public/documents/{mode}/{uuid}', [PublicDocumentController::class, 'show'])
@@ -179,7 +199,7 @@ Route::get('public/documents/{mode}/{uuid}/download', [PublicDocumentController:
     ->where('mode', 'receipt|invoice')
     ->name('public.documents.download');
 Route::prefix('mpesa/callbacks')
-    ->middleware('mpesa.callback')
+    // ->middleware('mpesa.callback')
     ->group(function () {
         Route::post('/stk',                    [MpesaCallbackController::class, 'stk']);
         Route::post('/c2b/validation',         [MpesaCallbackController::class, 'c2bValidation']);

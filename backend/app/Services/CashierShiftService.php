@@ -161,12 +161,10 @@ class CashierShiftService
 
         abort_unless($shift, 404, 'No open cashier shift was found for that cashier and business date.');
 
-        $summary        = $this->buildUserDaySummary($storeId, $targetCashierId, $resolvedDate);
-        $openingBalance = round((float) ($shift->opening_balance ?? 0), 2);
-        $cashSales      = round((float) ($summary['cash_sales'] ?? 0), 2);
-        $expectedCash   = round($openingBalance + $cashSales, 2);
-        $counted        = $countedCash !== null ? round($countedCash, 2) : null;
-        $variance       = $counted !== null ? round($counted - $expectedCash, 2) : null;
+        $summary           = $this->buildUserDaySummary($storeId, $targetCashierId, $resolvedDate);
+        $expectedCash      = round((float) ($summary['cash_in_till'] ?? $summary['expected_cash'] ?? 0), 2);
+        $counted           = $countedCash !== null ? round($countedCash, 2) : null;
+        $variance          = $counted !== null ? round($counted - $expectedCash, 2) : null;
 
 
         abort_if($counted === null, 422, 'Physical drawer count is required before closing a shift.');
@@ -219,6 +217,86 @@ class CashierShiftService
         return [
             'shift'   => $this->transformShift($shift),
             'summary' => $summary,
+        ];
+    }
+
+    public function recordCashDrop(User $actor, int $storeId, float $amount, ?string $note = null, ?int $cashierUserId = null, ?string $businessDate = null): array
+    {
+        $this->ensureShiftTableExists();
+        abort_unless(Schema::hasTable('finance_transactions'), 422, 'Run the finance transactions migration before recording cash drops.');
+        $this->assertStoreAccess($actor, $storeId);
+
+        $resolvedDate = $this->resolveBusinessDate($businessDate);
+        $targetCashierId = $cashierUserId ?: (int) $actor->user_id;
+
+        if ($cashierUserId === null && ($actor->isAdmin() || $actor->isManager()) && (int) $actor->user_id !== $targetCashierId) {
+            $targetCashierId = (int) $actor->user_id;
+        }
+
+        if (($actor->isAdmin() || $actor->isManager()) && $cashierUserId === null && (int) $actor->user_id === $targetCashierId) {
+            $fallbackShift = CashierShift::query()
+                ->where('store_id', $storeId)
+                ->whereDate('business_date', $resolvedDate)
+                ->where('status', 'open')
+                ->orderBy('opened_at')
+                ->first();
+
+            if ($fallbackShift) {
+                $targetCashierId = (int) $fallbackShift->user_id;
+            }
+        }
+
+        $isSelf = (int) $actor->user_id === $targetCashierId;
+        $isManagerOrAdmin = $actor->isAdmin() || $actor->isManager();
+        if (!$isSelf && !$isManagerOrAdmin) {
+            abort(403, 'You are not allowed to record a cash drop for another cashier.');
+        }
+
+        $shift = CashierShift::query()
+            ->where('store_id', $storeId)
+            ->where('user_id', $targetCashierId)
+            ->whereDate('business_date', $resolvedDate)
+            ->where('status', 'open')
+            ->first();
+
+        abort_unless($shift, 404, 'No open cashier shift was found for the selected cashier.');
+        abort_if($amount <= 0, 422, 'Cash drop amount must be greater than zero.');
+
+        $summary = $this->buildUserDaySummary($storeId, $targetCashierId, $resolvedDate);
+        $available = round((float) ($summary['cash_in_till'] ?? 0), 2);
+        abort_if($amount > $available, 422, 'Cash drop amount exceeds the available till balance.');
+
+        $reference = 'DROP-' . now()->format('YmdHis') . '-' . strtoupper(substr(md5((string) microtime(true)), 0, 5));
+
+        DB::table('finance_transactions')->insert([
+            'uuid' => \Illuminate\Support\Str::uuid()->toString(),
+            'store_id' => $storeId,
+            'user_id' => $targetCashierId,
+            'cashier_shift_id' => (int) $shift->cashier_shift_id,
+            'transaction_type' => 'cash_drop',
+            'flow' => 'outgoing',
+            'method' => 'cash',
+            'category' => 'Safe Drop',
+            'entity_name' => 'Main Safe / Vault',
+            'reference_no' => $reference,
+            'amount' => round($amount, 2),
+            'transaction_date' => now(),
+            'status' => 'posted',
+            'notes' => $note,
+            'meta' => json_encode([
+                'recorded_by_user_id' => (int) $actor->user_id,
+                'cashier_user_id' => $targetCashierId,
+            ]),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        return [
+            'reference_no' => $reference,
+            'amount' => round($amount, 2),
+            'cashier_shift_id' => (int) $shift->cashier_shift_id,
+            'cashier_user_id' => $targetCashierId,
+            'summary' => $this->buildUserDaySummary($storeId, $targetCashierId, $resolvedDate),
         ];
     }
 
@@ -277,6 +355,9 @@ class CashierShiftService
             'total_sales'             => round((float) $rows->sum('total_sales'), 2),
             'total_cash_sales'        => round((float) $rows->sum('cash_sales'), 2),
             'total_non_cash_sales'    => round((float) $rows->sum('non_cash_sales'), 2),
+            'total_cash_outflows'     => round((float) $rows->sum('cash_outflows'), 2),
+            'total_safe_drops'        => round((float) $rows->sum('safe_drops'), 2),
+            'total_cash_in_till'      => round((float) $rows->sum('cash_in_till'), 2),
             'total_refunds'           => round((float) $rows->sum('refunds'), 2),
             'total_transactions'      => (int) $rows->sum('transactions'),
             'total_expected_cash'     => round((float) $rows->sum('expected_cash'), 2),
@@ -393,14 +474,45 @@ class CashierShiftService
 
         $productsSold = $this->buildProductsSoldSummary([$storeId], $cashierUserId, $resolvedDate);
 
-        $cashSales      = collect($paymentBreakdown)
+        $cashSales = collect($paymentBreakdown)
             ->filter(fn ($row) => strtolower((string) ($row['method'] ?? '')) === 'cash')
             ->sum('amount');
 
-        $totalSales       = round((float) ($billingAgg->total_sales ?? 0), 2);
-        $openingBalance   = round((float) ($shiftRow->opening_balance ?? 0), 2);
-        $carryForward     = round((float) ($shiftRow->carry_forward_variance ?? 0), 2);
-        $expectedCash     = round((float) ($shiftRow->expected_cash ?? ($openingBalance + $cashSales)), 2);
+        $cashSupplierPayouts = Schema::hasTable('grn_payments')
+            ? (float) DB::table('grn_payments')
+                ->where('store_id', $storeId)
+                ->where('user_id', $cashierUserId)
+                ->whereNull('deleted_at')
+                ->whereDate(DB::raw('COALESCE(paid_at, created_at)'), $resolvedDate)
+                ->whereRaw('LOWER(payment_method) = ?', ['cash'])
+                ->sum('amount_paid')
+            : 0.0;
+
+        $cashExpenseAgg = Schema::hasTable('finance_transactions')
+            ? DB::table('finance_transactions')
+                ->selectRaw("COALESCE(SUM(CASE WHEN transaction_type = 'manual_expense' AND LOWER(method) = 'cash' THEN amount ELSE 0 END), 0) as cash_expenses")
+                ->selectRaw("COALESCE(SUM(CASE WHEN transaction_type = 'cash_drop' THEN amount ELSE 0 END), 0) as safe_drops")
+                ->where('store_id', $storeId)
+                ->where(function ($query) use ($cashierUserId, $shiftRow, $resolvedDate) {
+                    if ($shiftRow?->cashier_shift_id) {
+                        $query->where('cashier_shift_id', $shiftRow->cashier_shift_id);
+                        return;
+                    }
+
+                    $query->where('user_id', $cashierUserId)
+                        ->whereDate('transaction_date', $resolvedDate);
+                })
+                ->first()
+            : null;
+
+        $cashExpenses = round((float) ($cashExpenseAgg->cash_expenses ?? 0), 2);
+        $safeDrops = round((float) ($cashExpenseAgg->safe_drops ?? 0), 2);
+        $cashOutflows = round($cashSupplierPayouts + $cashExpenses, 2);
+        $totalSales = round((float) ($billingAgg->total_sales ?? 0), 2);
+        $openingBalance = round((float) ($shiftRow->opening_balance ?? 0), 2);
+        $carryForward = round((float) ($shiftRow->carry_forward_variance ?? 0), 2);
+        $computedTillCash = round($openingBalance + $cashSales - $cashOutflows - $safeDrops, 2);
+        $expectedCash = round((float) ($shiftRow->expected_cash ?? $computedTillCash), 2);
 
         $closedByName = null;
         if ($shiftRow && $shiftRow->closed_by_user_id) {
@@ -427,6 +539,11 @@ class CashierShiftService
             'total_sales'             => $totalSales,
             'cash_sales'              => round((float) $cashSales, 2),
             'non_cash_sales'          => round(max($totalSales - $cashSales, 0), 2),
+            'cash_supplier_payouts'   => round($cashSupplierPayouts, 2),
+            'cash_expenses'           => round($cashExpenses, 2),
+            'cash_outflows'           => round($cashOutflows, 2),
+            'safe_drops'              => round($safeDrops, 2),
+            'cash_in_till'            => round($computedTillCash, 2),
             'refunds'                 => round((float) ($billingAgg->refunds ?? 0), 2),
             'outstanding'             => round((float) ($billingAgg->outstanding ?? 0), 2),
             'total_voids'             => (int) ($billingAgg->total_voids ?? 0),
@@ -510,6 +627,11 @@ private function buildProductsSoldSummary(array $storeIds, ?int $cashierUserId, 
             'total_sales'             => 0,
             'cash_sales'              => 0,
             'non_cash_sales'          => 0,
+            'cash_supplier_payouts'   => 0,
+            'cash_expenses'           => 0,
+            'cash_outflows'           => 0,
+            'safe_drops'              => 0,
+            'cash_in_till'            => 0,
             'refunds'                 => 0,
             'outstanding'             => 0,
             'total_voids'             => 0,

@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Services\Mpesa\MpesaB2bService;
 use App\Services\Mpesa\MpesaService;
+use App\Services\Mpesa\RealtimeC2BPaymentService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -14,13 +15,14 @@ class MpesaCallbackController extends Controller
     public function __construct(
         private readonly MpesaService $service,
         private readonly MpesaB2bService $b2bService,
+        private readonly RealtimeC2BPaymentService $realtimeService,
     ) {
     }
 
     public function stk(Request $request): JsonResponse
     {
         if ($request->attributes->get('mpesa_untrusted')) {
-            return $this->ack();
+            return $this->ack('Accepted');
         }
 
         try {
@@ -31,13 +33,13 @@ class MpesaCallbackController extends Controller
             Log::error('[Mpesa] STK callback error', ['error' => $e->getMessage()]);
         }
 
-        return $this->ack();
+        return $this->ack('Accepted');
     }
 
     public function c2bValidation(Request $request): JsonResponse
     {
         if ($request->attributes->get('mpesa_untrusted')) {
-            return $this->ack();
+            return $this->ack('Accepted');
         }
 
         try {
@@ -45,31 +47,37 @@ class MpesaCallbackController extends Controller
             return response()->json($result);
         } catch (\Throwable $e) {
             Log::error('[Mpesa] C2B validation error', ['error' => $e->getMessage()]);
-            return $this->ack();
+            return $this->ack('Accepted');
         }
     }
 
     public function c2bConfirmation(Request $request): JsonResponse
     {
         if ($request->attributes->get('mpesa_untrusted')) {
-            return $this->ack();
+            return $this->ack('Confirmation received successfully');
         }
 
-        try {
-            $payload = $request->all();
-            Log::info('[Mpesa] C2B confirmation received', $payload);
-            $this->service->handleC2bConfirmation($payload);
-        } catch (\Throwable $e) {
-            Log::error('[Mpesa] C2B confirmation error', ['error' => $e->getMessage()]);
-        }
+        $payload = $request->all();
+        Log::info('[Mpesa] C2B confirmation received', $payload);
 
-        return $this->ack();
+        app()->terminating(function () use ($payload) {
+            try {
+                $this->realtimeService->processIncomingConfirmation($payload);
+            } catch (\Throwable $e) {
+                Log::error('[Mpesa] C2B confirmation processing error', [
+                    'error' => $e->getMessage(),
+                    'payload' => $payload,
+                ]);
+            }
+        });
+
+        return $this->ack('Confirmation received successfully');
     }
 
     public function b2bResult(Request $request): JsonResponse
     {
         if ($request->attributes->get('mpesa_untrusted')) {
-            return $this->ack();
+            return $this->ack('Accepted');
         }
 
         try {
@@ -80,13 +88,13 @@ class MpesaCallbackController extends Controller
             Log::error('[Mpesa][B2B] Result callback error', ['error' => $e->getMessage()]);
         }
 
-        return $this->ack();
+        return $this->ack('Accepted');
     }
 
     public function b2bTimeout(Request $request): JsonResponse
     {
         if ($request->attributes->get('mpesa_untrusted')) {
-            return $this->ack();
+            return $this->ack('Accepted');
         }
 
         try {
@@ -97,23 +105,45 @@ class MpesaCallbackController extends Controller
             Log::error('[Mpesa][B2B] Timeout callback error', ['error' => $e->getMessage()]);
         }
 
-        return $this->ack();
+        return $this->ack('Accepted');
     }
 
     public function txStatusResult(Request $request): JsonResponse
     {
-        Log::info('[Mpesa] Transaction Status result', $request->all());
-        return $this->ack();
+        if ($request->attributes->get('mpesa_untrusted')) {
+            return $this->ack('Accepted');
+        }
+
+        try {
+            $payload = $request->all();
+            Log::info('[Mpesa] Transaction Status result', $payload);
+            $this->service->handleTransactionStatusResult($payload);
+        } catch (\Throwable $e) {
+            Log::error('[Mpesa] Transaction Status result error', ['error' => $e->getMessage()]);
+        }
+
+        return $this->ack('Accepted');
     }
 
     public function txStatusTimeout(Request $request): JsonResponse
     {
-        Log::warning('[Mpesa] Transaction Status timeout', $request->all());
-        return $this->ack();
+        if ($request->attributes->get('mpesa_untrusted')) {
+            return $this->ack('Accepted');
+        }
+
+        try {
+            $payload = $request->all();
+            Log::warning('[Mpesa] Transaction Status timeout', $payload);
+            $this->service->handleTransactionStatusTimeout($payload);
+        } catch (\Throwable $e) {
+            Log::error('[Mpesa] Transaction Status timeout error', ['error' => $e->getMessage()]);
+        }
+
+        return $this->ack('Accepted');
     }
 
-    private function ack(): JsonResponse
+    private function ack(string $message): JsonResponse
     {
-        return response()->json(['ResultCode' => 0, 'ResultDesc' => 'Accepted']);
+        return response()->json(['ResultCode' => 0, 'ResultDesc' => $message]);
     }
 }

@@ -38,6 +38,7 @@ class PaymentVoucherController extends Controller
                 $term = trim((string) $request->search);
                 $q->where(function ($sub) use ($term) {
                     $sub->where('voucher_number', 'like', "%{$term}%")
+                        ->orWhere('receipt_number', 'like', "%{$term}%")
                         ->orWhere('invoice_number', 'like', "%{$term}%")
                         ->orWhere('delivery_note_no', 'like', "%{$term}%")
                         ->orWhere('payee_name', 'like', "%{$term}%")
@@ -112,6 +113,14 @@ class PaymentVoucherController extends Controller
         return response()->json([
             'message' => 'Payment voucher updated successfully.',
             'data' => $this->service->update($request->user(), $paymentVoucher, $request->validated()),
+        ]);
+    }
+
+    public function generateReceipt(Request $request, PaymentVoucher $paymentVoucher): JsonResponse
+    {
+        return response()->json([
+            'message' => 'Final payment receipt generated successfully.',
+            'data' => $this->service->generateReceipt($request->user(), $paymentVoucher),
         ]);
     }
 }

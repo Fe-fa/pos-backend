@@ -35,6 +35,10 @@ class GrnPayment extends Model
         'bank_reference',
         'notes',
         'paid_at',
+        'slip_number',
+        'slip_type',
+        'slip_generated_at',
+        'installment_number',
     ];
 
     protected $casts = [
@@ -43,6 +47,8 @@ class GrnPayment extends Model
         'amount_tendered' => 'decimal:2',
         'change_returned' => 'decimal:2',
         'paid_at' => 'datetime',
+        'slip_generated_at' => 'datetime',
+        'installment_number' => 'integer',
         'deleted_at' => 'datetime',
     ];
 

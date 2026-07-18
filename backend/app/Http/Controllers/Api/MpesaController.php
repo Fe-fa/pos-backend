@@ -295,23 +295,79 @@ class MpesaController extends Controller
 
         try {
             $billing = Billing::findOrFail($data['billing_id']);
-            $txn = $this->service->validateManualReceipt(
+            $result = $this->service->validateManualReceipt(
                 $billing,
                 $request->user(),
                 $data['mpesa_receipt'],
                 (float) $data['amount'],
-                $data['phone'] ?? null
+                $data['phone'] ?? null,
+                $data['split_allocations'] ?? [],
+                (int) ($data['points_redeemed'] ?? 0)
             );
 
             return response()->json([
-                'message' => 'M-Pesa receipt validated and payment recorded.',
-                'data' => [
-                    'mpesa_transaction_id' => $txn->mpesa_transaction_id,
-                    'status' => $txn->status,
-                    'mpesa_receipt' => $txn->mpesa_receipt,
-                    'payment_id' => $txn->payment_id,
-                ],
+                'message' => ($result['status'] ?? null) === 'success'
+                    ? 'M-Pesa receipt validated and payment recorded.'
+                    : 'M-Pesa receipt validation sent. Waiting for Safaricom confirmation.',
+                'data' => $result,
             ]);
+        } catch (\Throwable $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+    }
+
+    public function manualStatus(string $trackingReference): JsonResponse
+    {
+        if ($error = $this->authorizePermission('payments.charge')) return $error;
+
+        return response()->json([
+            'data' => $this->service->manualStatus($trackingReference),
+        ]);
+    }
+
+    public function pullMatch(Request $request): JsonResponse
+    {
+        if ($error = $this->authorizePermission('payments.charge')) return $error;
+
+        $data = $request->validate([
+            'billing_id' => ['required', 'integer', 'exists:billing,billing_id'],
+            'phone' => ['required', 'string', 'min:9', 'max:20'],
+            'amount' => ['required', 'numeric', 'gt:0'],
+            'lookback_minutes' => ['nullable', 'integer', 'min:1', 'max:2880'],
+            'points_redeemed' => ['nullable', 'integer', 'min:0'],
+            'split_allocations' => ['nullable', 'array', 'min:1'],
+            'split_allocations.*.payment_method' => ['required_with:split_allocations', 'string'],
+            'split_allocations.*.amount_received' => ['required_with:split_allocations', 'numeric', 'gt:0'],
+            'split_allocations.*.amount_tendered' => ['nullable', 'numeric', 'min:0'],
+            'split_allocations.*.mpesa_phone' => ['nullable', 'string', 'max:30'],
+            'split_allocations.*.mpesa_code' => ['nullable', 'string', 'max:50'],
+            'split_allocations.*.mpesa_mode' => ['nullable', 'string', 'max:20'],
+            'split_allocations.*.card_reference' => ['nullable', 'string', 'max:100'],
+            'split_allocations.*.card_holder' => ['nullable', 'string', 'max:100'],
+        ]);
+
+        try {
+            $billing = Billing::findOrFail($data['billing_id']);
+            $result = $this->service->pullMatchForBilling(
+                $billing,
+                $request->user(),
+                $data['phone'],
+                (float) $data['amount'],
+                $data['split_allocations'] ?? [],
+                (int) ($data['points_redeemed'] ?? 0),
+                isset($data['lookback_minutes']) ? (int) $data['lookback_minutes'] : null,
+            );
+
+            $status = $result['status'] ?? 'unknown';
+            $httpCode = $status === 'success' ? 200 : 404;
+            $message = $status === 'success'
+                ? 'Matching M-Pesa payment found and recorded.'
+                : 'No matching recent M-Pesa payment was found for that phone and amount.';
+
+            return response()->json([
+                'message' => $message,
+                'data' => $result,
+            ], $httpCode);
         } catch (\Throwable $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         }

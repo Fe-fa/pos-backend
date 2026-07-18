@@ -386,7 +386,8 @@ class PaymentVoucherService
                 ]);
             }
 
-            $this->recordSupplierPaymentLedger($record->grn, $record, $payment->fresh(), $user, 'cash');
+            $payment = $this->generatePaymentSlip($record, $payment->fresh(), $user);
+            $this->recordSupplierPaymentLedger($record->grn, $record, $payment, $user, 'cash');
             $this->refreshSupplierBalance($record->supplier_id);
             $record = $this->syncVoucherAndGrnAfterSettlement($record, $user);
 
@@ -463,13 +464,122 @@ class PaymentVoucherService
                 ]);
             }
 
-            $this->recordSupplierPaymentLedger($grn, $voucher, $payment->fresh(), $user, 'mpesa');
+            $payment = $this->generatePaymentSlip($voucher, $payment->fresh(), $user);
+            $this->recordSupplierPaymentLedger($grn, $voucher, $payment, $user, 'mpesa');
             $this->refreshSupplierBalance($voucher->supplier_id);
             $voucher = $this->syncVoucherAndGrnAfterSettlement($voucher, $user);
             $txn->update(['payment_id' => $payment->grn_payment_id]);
 
             return $payment->fresh();
         });
+    }
+
+    public function generateReceipt(User $user, PaymentVoucher $voucher): PaymentVoucher
+    {
+        $this->authorizeStoreAccess($user, $voucher->store_id);
+
+        return DB::transaction(function () use ($user, $voucher) {
+            $record = PaymentVoucher::query()
+                ->with($this->detailRelations())
+                ->lockForUpdate()
+                ->findOrFail($voucher->payment_voucher_id);
+
+            $record = $this->syncVoucherAndGrnAfterSettlement($record, $user);
+            $remainingBalance = round((float) ($record->balance_due ?? 0), 2);
+
+            if ($remainingBalance > 0.009 || $this->normalizeStatus($record->status) !== self::STATUS_PAID) {
+                throw new HttpResponseException(response()->json([
+                    'message' => 'Final receipt can only be generated after the voucher is fully paid.',
+                    'data' => [
+                        'remaining_balance' => $remainingBalance,
+                        'payment_history' => $this->buildPaymentHistory($record),
+                    ],
+                ], 422));
+            }
+
+            $record = $this->maybeGenerateFinalReceipt($record, $user, true);
+
+            return $this->present($record->fresh()->load($this->detailRelations()));
+        });
+    }
+
+    public function generatePaymentSlip(PaymentVoucher $voucher, GrnPayment $payment, ?User $actor = null): GrnPayment
+    {
+        if (!$voucher->payment_voucher_id || !$payment->grn_payment_id || !Schema::hasColumn('grn_payments', 'slip_number')) {
+            return $payment->fresh();
+        }
+
+        $installmentNumber = $payment->installment_number ?: $this->nextInstallmentNumber($voucher);
+        $voucherToken = $this->formatVoucherToken($voucher);
+        $slipNumber = $payment->slip_number ?: sprintf('SLIP-%s-%d', $voucherToken, $installmentNumber);
+        $remainingAfterPayment = round(max((float) $voucher->amount - ($this->completedDisbursedForVoucher($voucher->payment_voucher_id) + (float) $payment->amount_paid), 0), 2);
+        $slipType = $remainingAfterPayment <= 0.009 ? 'final_installment' : 'installment';
+
+        $payload = [
+            'slip_number' => $slipNumber,
+            'installment_number' => $installmentNumber,
+        ];
+
+        if (Schema::hasColumn('grn_payments', 'slip_type')) {
+            $payload['slip_type'] = $slipType;
+        }
+
+        if (Schema::hasColumn('grn_payments', 'slip_generated_at')) {
+            $payload['slip_generated_at'] = $payment->slip_generated_at ?? now();
+        }
+
+        $payment->update($payload);
+
+        return $payment->fresh()->loadMissing('user');
+    }
+
+    public function maybeGenerateFinalReceipt(PaymentVoucher $voucher, ?User $actor = null, bool $forceRegenerate = false): PaymentVoucher
+    {
+        if (!Schema::hasColumn('payment_vouchers', 'receipt_number')) {
+            return $voucher->fresh()->load($this->detailRelations());
+        }
+
+        $voucher = $voucher->fresh()->load($this->detailRelations());
+        $remainingBalance = round((float) ($voucher->balance_due ?? 0), 2);
+        $status = $this->normalizeStatus($voucher->status);
+
+        if ($remainingBalance > 0.009 || $status !== self::STATUS_PAID) {
+            if ($forceRegenerate) {
+                throw new HttpResponseException(response()->json([
+                    'message' => 'Final receipt is locked until the voucher balance reaches zero.',
+                    'data' => [
+                        'remaining_balance' => $remainingBalance,
+                    ],
+                ], 422));
+            }
+
+            return $voucher;
+        }
+
+        if (!$forceRegenerate && $voucher->receipt_number) {
+            return $voucher;
+        }
+
+        $history = $this->buildPaymentHistory($voucher);
+        $voucherToken = $this->formatVoucherToken($voucher);
+        $receiptNumber = sprintf('RCP-%s-%s', $voucherToken, now()->format('ymdHi'));
+
+        $payload = [
+            'receipt_number' => $receiptNumber,
+            'receipt_payment_breakdown' => $history,
+        ];
+
+        if (Schema::hasColumn('payment_vouchers', 'receipt_generated_at')) {
+            $payload['receipt_generated_at'] = now();
+        }
+
+        if (Schema::hasColumn('payment_vouchers', 'receipt_generated_by_user_id')) {
+            $payload['receipt_generated_by_user_id'] = $actor?->user_id ?? $voucher->approved_by_user_id ?? $voucher->prepared_by_user_id;
+        }
+
+        $voucher->update($payload);
+
+        return $voucher->fresh()->load($this->detailRelations());
     }
 
     public function present(PaymentVoucher $voucher): PaymentVoucher
@@ -502,7 +612,9 @@ class PaymentVoucherService
             'purchaseOrder',
             'preparedBy',
             'approvedBy',
+            'receiptGeneratedBy',
             'payments.user',
+            'settledPayments.user',
         ];
     }
 
@@ -547,6 +659,7 @@ class PaymentVoucherService
     {
         $voucher = $this->recalculateVoucherFinancials($voucher->fresh()->load($this->detailRelations()), $actor);
         $this->syncLinkedGrnTotals($voucher->grn_id);
+        $voucher = $this->maybeGenerateFinalReceipt($voucher, $actor);
 
         return $voucher->fresh()->load($this->detailRelations());
     }
@@ -615,16 +728,30 @@ class PaymentVoucherService
         $currentStatus = $this->normalizeStatus($voucher->status);
         $totalDisbursed = $this->completedDisbursedForVoucher($voucher->payment_voucher_id);
         $remainingBalance = round(max((float) $voucher->amount - $totalDisbursed, 0), 2);
+        $paymentHistory = $this->buildPaymentHistory($voucher);
+        $installmentCount = count($paymentHistory);
+        $latestPayment = $installmentCount > 0 ? $paymentHistory[$installmentCount - 1] : null;
+        $receiptNumber = (string) ($voucher->receipt_number ?? '');
+        $receiptAvailable = $receiptNumber !== '';
+        $canGenerateReceipt = $currentStatus === self::STATUS_PAID && $remainingBalance <= 0.009;
 
         $voucher->setAttribute('match_summary', $summary);
         $voucher->setAttribute('requires_override', $requiresOverride);
         $voucher->setAttribute('total_disbursed', $totalDisbursed);
         $voucher->setAttribute('remaining_balance', $remainingBalance);
-        $voucher->setAttribute('receipt_available', $currentStatus === self::STATUS_PAID && $remainingBalance <= 0.009);
+        $voucher->setAttribute('receipt_available', $receiptAvailable);
+        $voucher->setAttribute('can_generate_receipt', $canGenerateReceipt);
+        $voucher->setAttribute('receipt_number', $voucher->receipt_number);
+        $voucher->setAttribute('receipt_generated_at', $voucher->receipt_generated_at);
+        $voucher->setAttribute('receipt_payment_breakdown', $voucher->receipt_payment_breakdown);
+        $voucher->setAttribute('payment_history', $paymentHistory);
+        $voucher->setAttribute('installment_count', $installmentCount);
+        $voucher->setAttribute('latest_slip_number', $latestPayment['slip_number'] ?? null);
         $voucher->setAttribute('payment_gate_status', [
             'locked' => $currentStatus === self::STATUS_OVERRIDE_REQUIRED,
             'processing' => $currentStatus === self::STATUS_PROCESSING,
             'remaining_balance' => $remainingBalance,
+            'receipt_locked' => !$canGenerateReceipt,
         ]);
         $voucher->setAttribute('verifiedBy', $voucher->approvedBy);
         $voucher->setAttribute('prepared_by_name', $voucher->preparedBy ? $this->displayName($voucher->preparedBy) : null);
@@ -643,9 +770,11 @@ class PaymentVoucherService
                 self::STATUS_OVERRIDE_REQUIRED => 'Override approval required before the payment window can unlock.',
                 self::STATUS_PENDING_APPROVAL => 'Awaiting approval from the payment voucher desk.',
                 self::STATUS_AUTHORIZED => 'Voucher is authorized and ready for a partial or full payout.',
-                self::STATUS_PARTIALLY_PAID => 'A partial payout was posted. Continue disbursing the remaining balance from the payment window.',
+                self::STATUS_PARTIALLY_PAID => 'A partial payout was posted. Print the installment slip and continue disbursing the remaining balance from the payment window.',
                 self::STATUS_PROCESSING => 'M-Pesa payout is in progress. Wait for Safaricom callback before retrying.',
-                self::STATUS_PAID => 'Voucher liability is fully settled. Receipt generation is now unlocked.',
+                self::STATUS_PAID => $receiptAvailable
+                    ? 'Voucher liability is fully settled. Final receipt is ready for print.'
+                    : 'Voucher liability is fully settled. Final receipt can now be generated.',
                 default => 'Prepare the voucher and submit it to the approval desk.',
             },
         ]);
@@ -777,6 +906,54 @@ class PaymentVoucherService
             'issues' => $issues,
             'lines' => $lines,
         ];
+    }
+
+
+    private function buildPaymentHistory(PaymentVoucher $voucher): array
+    {
+        $payments = $voucher->relationLoaded('settledPayments')
+            ? $voucher->settledPayments
+            : $voucher->settledPayments()->with('user')->get();
+
+        return $payments
+            ->sortBy([
+                ['paid_at', 'asc'],
+                ['grn_payment_id', 'asc'],
+            ])
+            ->values()
+            ->map(function (GrnPayment $payment) use ($voucher) {
+                return [
+                    'grn_payment_id' => (int) $payment->grn_payment_id,
+                    'payment_number' => $payment->payment_number,
+                    'slip_number' => $payment->slip_number,
+                    'slip_type' => $payment->slip_type ?: ((float) $payment->amount_paid >= (float) $voucher->amount ? 'full' : 'installment'),
+                    'installment_number' => (int) ($payment->installment_number ?: 0),
+                    'payment_method' => $payment->payment_method,
+                    'amount_paid' => round((float) $payment->amount_paid, 2),
+                    'amount_received' => round((float) ($payment->amount_received ?? $payment->amount_paid), 2),
+                    'paid_at' => optional($payment->paid_at)->toISOString() ?: optional($payment->created_at)->toISOString(),
+                    'processed_by_name' => $payment->relationLoaded('user') || $payment->user
+                        ? $this->displayName($payment->user)
+                        : null,
+                    'notes' => $payment->notes,
+                    'mpesa_code' => $payment->mpesa_code,
+                    'bank_reference' => $payment->bank_reference,
+                ];
+            })
+            ->all();
+    }
+
+    private function nextInstallmentNumber(PaymentVoucher $voucher): int
+    {
+        return max((int) GrnPayment::query()
+            ->where('payment_voucher_id', (int) $voucher->payment_voucher_id)
+            ->withTrashed()
+            ->max('installment_number'), 0) + 1;
+    }
+
+    private function formatVoucherToken(PaymentVoucher $voucher): string
+    {
+        return 'PV' . str_pad((string) $voucher->payment_voucher_id, 6, '0', STR_PAD_LEFT);
     }
 
     private function completedDisbursedForVoucher(int|string|null $voucherId): float

@@ -405,7 +405,9 @@ class GrnService
                 ]);
             }
 
-            $this->applyVoucherSettlement($voucher, $payment, $user);
+            $payment = $this->assignVoucherPaymentSlip($voucher, $payment->fresh(), $user);
+            $voucher = $this->applyVoucherSettlement($voucher, $payment, $user);
+            $voucher = $this->maybeGenerateReceiptFromVoucher($voucher, $user) ?: $voucher;
             $this->recordSupplierPaymentLedger($record, $payment->fresh(), $user, $data['payment_method']);
             $this->refreshSupplierBalance($record->supplier_id);
 
@@ -427,9 +429,13 @@ class GrnService
             }
 
             $grn = Grn::query()->lockForUpdate()->findOrFail($txn->grn_id);
+            $voucher = $txn->payment_voucher_id
+                ? PaymentVoucher::query()->lockForUpdate()->find($txn->payment_voucher_id)
+                : null;
             $grn = $this->recalculateTotals($grn);
             $balanceDue = (float) $grn->balance_due;
-            if ($balanceDue <= 0) {
+            $voucherBalance = $voucher ? (float) $voucher->balance_due : $balanceDue;
+            if ($balanceDue <= 0 || ($voucher && $voucherBalance <= 0)) {
                 return null;
             }
 
@@ -439,12 +445,14 @@ class GrnService
             }
 
             $amountReceived = round((float) $txn->amount, 2);
-            $amountPaid = round(min($amountReceived, $balanceDue), 2);
+            $amountPaid = round(min($amountReceived, $balanceDue, $voucherBalance), 2);
 
             $payment = GrnPayment::create([
                 'grn_id' => $grn->grn_id,
                 'store_id' => $grn->store_id,
                 'user_id' => $user->user_id,
+                'payment_voucher_id' => $voucher?->payment_voucher_id,
+                'payment_voucher_number' => $voucher?->voucher_number,
                 'payment_number' => null,
                 'payment_method' => 'mpesa',
                 'status' => 'posted',
@@ -454,6 +462,7 @@ class GrnService
                 'change_returned' => 0,
                 'mpesa_phone' => $txn->phone_number,
                 'mpesa_code' => $txn->mpesa_receipt,
+                'bank_reference' => $txn->conversation_id,
                 'notes' => 'Auto-posted from M-Pesa callback',
                 'paid_at' => $txn->transaction_date ?? now(),
             ]);
@@ -464,9 +473,16 @@ class GrnService
                 ]);
             }
 
+            if ($voucher) {
+                $payment = $this->assignVoucherPaymentSlip($voucher, $payment->fresh(), $user);
+                $voucher = $this->applyVoucherSettlement($voucher, $payment, $user);
+                $this->maybeGenerateReceiptFromVoucher($voucher, $user);
+            }
+
             $this->recordSupplierPaymentLedger($grn, $payment, $user, 'mpesa');
             $this->refreshSupplierBalance($grn->supplier_id);
-            
+            $this->recalculateTotals($grn->fresh());
+
             return $payment->fresh();
         });
     }
@@ -527,7 +543,9 @@ class GrnService
                 ]);
             }
 
-            $this->applyVoucherSettlement($voucher, $payment, $user);
+            $payment = $this->assignVoucherPaymentSlip($voucher, $payment->fresh(), $user);
+            $voucher = $this->applyVoucherSettlement($voucher, $payment, $user);
+            $voucher = $this->maybeGenerateReceiptFromVoucher($voucher, $user) ?: $voucher;
             $this->recordSupplierPaymentLedger($grn, $payment->fresh(), $user, 'mpesa');
             $this->refreshSupplierBalance($grn->supplier_id);
             $this->recalculateTotals($grn->fresh());
@@ -782,6 +800,25 @@ class GrnService
         ]);
 
         return $voucher->fresh();
+    }
+
+
+    private function assignVoucherPaymentSlip(?PaymentVoucher $voucher, GrnPayment $payment, ?User $user = null): GrnPayment
+    {
+        if (!$voucher?->payment_voucher_id) {
+            return $payment;
+        }
+
+        return app(PaymentVoucherService::class)->generatePaymentSlip($voucher->fresh(), $payment, $user);
+    }
+
+    private function maybeGenerateReceiptFromVoucher(?PaymentVoucher $voucher, ?User $user = null): ?PaymentVoucher
+    {
+        if (!$voucher?->payment_voucher_id) {
+            return $voucher;
+        }
+
+        return app(PaymentVoucherService::class)->maybeGenerateFinalReceipt($voucher->fresh(), $user);
     }
 
     private function recordSupplierInvoiceLedger(Grn $grn, User $user): void
