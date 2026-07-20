@@ -43,7 +43,25 @@ class MpesaB2bService
             'environment' => $store->mpesa_environment ?? config('mpesa.environment', 'sandbox'),
             'callback_base_url' => $store->mpesa_callback_base_url ?? config('mpesa.callback_base_url') ?? config('app.url'),
             'certificate_path' => config('mpesa.b2b.certificate_path'),
+            'b2b_endpoint' => config('mpesa.b2b.endpoint'),
+            'b2c_endpoint' => config('mpesa.b2c.endpoint'),
+            'sender_identifier_type' => (string) config('mpesa.b2b.sender_identifier_type', '4'),
+            'till_receiver_identifier_type' => (string) config('mpesa.b2b.till_receiver_identifier_type', '2'),
+            'paybill_receiver_identifier_type' => (string) config('mpesa.b2b.paybill_receiver_identifier_type', '4'),
+            'b2c_command_id' => (string) config('mpesa.b2c.command_id', 'BusinessPayment'),
         ];
+    }
+
+    public function normalizeReceiverType(?string $value): string
+    {
+        $safe = strtolower(trim((string) $value));
+
+        return match ($safe) {
+            '', 'phone', 'mobile', 'mobile_money', 'mobile-money', 'mobile_wallet', 'msisdn' => 'mobile_wallet',
+            'till', 'buy_goods', 'buygoods', 'till_number', 'business_buy_goods' => 'till',
+            'paybill', 'shortcode', 'paybill_number', 'business_shortcode', 'business' => 'paybill',
+            default => throw new RuntimeException('Unsupported supplier payout receiver type.'),
+        };
     }
 
     public function normalizePhoneNumber(?string $value): string
@@ -66,42 +84,68 @@ class MpesaB2bService
         return $digits;
     }
 
+    public function normalizeShortcode(?string $value): string
+    {
+        $digits = preg_replace('/\D+/', '', (string) $value);
+
+        if ($digits === '' || strlen($digits) < 5) {
+            throw new RuntimeException('Till / PayBill payout requires a valid target shortcode.');
+        }
+
+        return $digits;
+    }
+
     public function initiate(Store $store, array $attributes): array
     {
         $creds = $this->resolveCredentialsForStore($store);
-        $phone = $this->normalizePhoneNumber((string) ($attributes['phone_number'] ?? ''));
+        $receiverType = $this->normalizeReceiverType($attributes['receiver_type'] ?? 'mobile_wallet');
 
-        // Safaricom requires a unique OriginatorConversationID per B2C request.
-        // Generate it up front so it can be persisted on the transaction row
-        // even if the HTTP call below fails, keeping callback matching consistent.
         $originatorConversationId = (string) ($attributes['originator_conversation_id'] ?? (string) Str::uuid());
 
-        $requestPayload = $this->buildPayoutPayload($creds, [
-            ...$attributes,
-            'phone_number' => $phone,
-            'originator_conversation_id' => $originatorConversationId,
-        ]);
+        if ($receiverType === 'mobile_wallet') {
+            $phone = $this->normalizePhoneNumber((string) ($attributes['phone_number'] ?? ''));
+            $requestPayload = $this->buildB2cPayload($creds, [
+                ...$attributes,
+                'receiver_type' => $receiverType,
+                'phone_number' => $phone,
+                'originator_conversation_id' => $originatorConversationId,
+            ]);
+            $endpoint = $this->b2cEndpoint($creds);
+            $normalizedTarget = ['normalized_phone' => $phone, 'normalized_shortcode' => null];
+        } else {
+            $shortcode = $this->normalizeShortcode((string) ($attributes['recipient_shortcode'] ?? ''));
+            $requestPayload = $this->buildB2bPayload($creds, [
+                ...$attributes,
+                'receiver_type' => $receiverType,
+                'recipient_shortcode' => $shortcode,
+                'originator_conversation_id' => $originatorConversationId,
+            ]);
+            $endpoint = $this->b2bEndpoint($creds);
+            $normalizedTarget = ['normalized_phone' => null, 'normalized_shortcode' => $shortcode];
+        }
+
         $this->assertFloatCoverage($store, (float) ($attributes['amount'] ?? 0), (float) ($attributes['transaction_fee'] ?? 0));
 
         $token = $this->accessToken($creds);
         $response = Http::asJson()
             ->timeout(45)
             ->withToken($token)
-            ->post($this->b2cEndpoint($creds), $requestPayload);
+            ->post($endpoint, $requestPayload);
 
         if (!$response->successful()) {
             throw new RuntimeException(
                 data_get($response->json(), 'errorMessage')
                 ?: data_get($response->json(), 'ResponseDescription')
-                ?: 'Safaricom B2C payout request failed.'
+                ?: 'Safaricom supplier payout request failed.'
             );
         }
 
         return [
-            'normalized_phone' => $phone,
+            'receiver_type' => $receiverType,
             'originator_conversation_id' => $originatorConversationId,
             'request_payload' => $requestPayload,
             'response' => $response->json(),
+            ...$normalizedTarget,
         ];
     }
 
@@ -123,6 +167,7 @@ class MpesaB2bService
         return [
             'mpesa_transaction_id' => $txn->mpesa_transaction_id,
             'status' => $txn->status,
+            'channel' => $txn->channel,
             'conversation_id' => $txn->conversation_id,
             'originator_conversation_id' => $txn->originator_conversation_id,
             'result_code' => $txn->result_code,
@@ -131,6 +176,8 @@ class MpesaB2bService
             'amount' => (float) $txn->amount,
             'voucher_id' => $txn->payment_voucher_id,
             'phone_number' => $txn->phone_number,
+            'vendor_shortcode' => $txn->vendor_shortcode,
+            'receiver_type' => $txn->receiver_type ?: data_get($txn->request_payload, 'receiver_type'),
             'remaining_balance' => $voucher ? $this->voucherService->remainingBalanceForVoucher($voucher) : null,
             'voucher_status' => $voucher?->status,
         ];
@@ -252,14 +299,14 @@ class MpesaB2bService
         });
     }
 
-    private function buildPayoutPayload(array $creds, array $attributes): array
+    private function buildB2cPayload(array $creds, array $attributes): array
     {
         return [
             'OriginatorConversationID' => (string) ($attributes['originator_conversation_id'] ?? (string) Str::uuid()),
             'InitiatorName' => $creds['initiator_name'],
             'Initiator' => $creds['initiator_name'],
             'SecurityCredential' => $this->securityCredential($creds),
-            'CommandID' => 'BusinessPayment',
+            'CommandID' => (string) ($creds['b2c_command_id'] ?? 'BusinessPayment'),
             'Amount' => (int) round((float) $attributes['amount']),
             'PartyA' => (string) $creds['sender_shortcode'],
             'PartyB' => (string) $attributes['phone_number'],
@@ -267,6 +314,30 @@ class MpesaB2bService
             'QueueTimeOutURL' => $this->timeoutUrl($creds),
             'ResultURL' => $this->resultUrl($creds),
             'Occasion' => (string) ($attributes['occasion'] ?? $attributes['account_reference'] ?? 'Supplier payout'),
+        ];
+    }
+
+    private function buildB2bPayload(array $creds, array $attributes): array
+    {
+        $receiverType = $this->normalizeReceiverType($attributes['receiver_type'] ?? 'paybill');
+
+        return [
+            'OriginatorConversationID' => (string) ($attributes['originator_conversation_id'] ?? (string) Str::uuid()),
+            'Initiator' => $creds['initiator_name'],
+            'InitiatorName' => $creds['initiator_name'],
+            'SecurityCredential' => $this->securityCredential($creds),
+            'CommandID' => $receiverType === 'till' ? 'BusinessBuyGoods' : 'BusinessPayBill',
+            'SenderIdentifierType' => (string) ($creds['sender_identifier_type'] ?? '4'),
+            'RecieverIdentifierType' => $receiverType === 'till'
+                ? (string) ($creds['till_receiver_identifier_type'] ?? '2')
+                : (string) ($creds['paybill_receiver_identifier_type'] ?? '4'),
+            'Amount' => (int) round((float) $attributes['amount']),
+            'PartyA' => (string) $creds['sender_shortcode'],
+            'PartyB' => (string) $attributes['recipient_shortcode'],
+            'AccountReference' => (string) ($attributes['account_reference'] ?? $attributes['occasion'] ?? 'Supplier payout'),
+            'Remarks' => (string) ($attributes['remarks'] ?? 'Supplier payout'),
+            'QueueTimeOutURL' => $this->timeoutUrl($creds),
+            'ResultURL' => $this->resultUrl($creds),
         ];
     }
 
@@ -305,8 +376,9 @@ class MpesaB2bService
             return $preGenerated;
         }
 
+        $isProduction = in_array(strtolower((string) ($creds['environment'] ?? 'sandbox')), ['live', 'production'], true);
         $certificatePath = $creds['certificate_path'] ?: storage_path(
-            ($creds['environment'] ?? 'sandbox') === 'live'
+            $isProduction
                 ? 'app/mpesa/ProductionCertificate.cer'
                 : 'app/mpesa/SandboxCertificate.cer'
         );
@@ -332,14 +404,21 @@ class MpesaB2bService
 
     private function baseUrl(array $creds): string
     {
-        return ($creds['environment'] ?? 'sandbox') === 'live'
+        $environment = strtolower((string) ($creds['environment'] ?? 'sandbox'));
+
+        return in_array($environment, ['live', 'production'], true)
             ? 'https://api.safaricom.co.ke'
             : 'https://sandbox.safaricom.co.ke';
     }
 
     private function b2cEndpoint(array $creds): string
     {
-        return rtrim((string) (config('mpesa.b2c.endpoint') ?: $this->baseUrl($creds) . '/mpesa/b2c/v3/paymentrequest'), '/');
+        return rtrim((string) ($creds['b2c_endpoint'] ?: config('mpesa.b2c.endpoint') ?: $this->baseUrl($creds) . '/mpesa/b2c/v3/paymentrequest'), '/');
+    }
+
+    private function b2bEndpoint(array $creds): string
+    {
+        return rtrim((string) ($creds['b2b_endpoint'] ?: config('mpesa.b2b.endpoint') ?: $this->baseUrl($creds) . '/mpesa/b2b/v1/paymentrequest'), '/');
     }
 
     private function resultUrl(array $creds): string

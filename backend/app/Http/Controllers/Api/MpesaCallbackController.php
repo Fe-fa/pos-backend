@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Services\Mpesa\MpesaB2bService;
+use App\Services\Mpesa\MpesaBalanceService;
 use App\Services\Mpesa\MpesaService;
 use App\Services\Mpesa\RealtimeC2BPaymentService;
 use Illuminate\Http\JsonResponse;
@@ -15,6 +16,7 @@ class MpesaCallbackController extends Controller
     public function __construct(
         private readonly MpesaService $service,
         private readonly MpesaB2bService $b2bService,
+        private readonly MpesaBalanceService $balanceService,
         private readonly RealtimeC2BPaymentService $realtimeService,
     ) {
     }
@@ -82,10 +84,10 @@ class MpesaCallbackController extends Controller
 
         try {
             $payload = $request->all();
-            Log::info('[Mpesa][B2B] Result callback received', $payload);
+            Log::info('[Mpesa][B2X] Result callback received', $payload);
             $this->b2bService->handleResultCallback($payload);
         } catch (\Throwable $e) {
-            Log::error('[Mpesa][B2B] Result callback error', ['error' => $e->getMessage()]);
+            Log::error('[Mpesa][B2X] Result callback error', ['error' => $e->getMessage()]);
         }
 
         return $this->ack('Accepted');
@@ -99,10 +101,44 @@ class MpesaCallbackController extends Controller
 
         try {
             $payload = $request->all();
-            Log::warning('[Mpesa][B2B] Timeout callback received', $payload);
+            Log::warning('[Mpesa][B2X] Timeout callback received', $payload);
             $this->b2bService->handleTimeoutCallback($payload);
         } catch (\Throwable $e) {
-            Log::error('[Mpesa][B2B] Timeout callback error', ['error' => $e->getMessage()]);
+            Log::error('[Mpesa][B2X] Timeout callback error', ['error' => $e->getMessage()]);
+        }
+
+        return $this->ack('Accepted');
+    }
+
+    public function balanceResult(Request $request): JsonResponse
+    {
+        if ($request->attributes->get('mpesa_untrusted')) {
+            return $this->ack('Accepted');
+        }
+
+        try {
+            $payload = $request->all();
+            Log::info('[Mpesa][Balance] Result callback received', $payload);
+            $this->balanceService->handleResultCallback($payload);
+        } catch (\Throwable $e) {
+            Log::error('[Mpesa][Balance] Result callback error', ['error' => $e->getMessage()]);
+        }
+
+        return $this->ack('Accepted');
+    }
+
+    public function balanceTimeout(Request $request): JsonResponse
+    {
+        if ($request->attributes->get('mpesa_untrusted')) {
+            return $this->ack('Accepted');
+        }
+
+        try {
+            $payload = $request->all();
+            Log::warning('[Mpesa][Balance] Timeout callback received', $payload);
+            $this->balanceService->handleTimeoutCallback($payload);
+        } catch (\Throwable $e) {
+            Log::error('[Mpesa][Balance] Timeout callback error', ['error' => $e->getMessage()]);
         }
 
         return $this->ack('Accepted');

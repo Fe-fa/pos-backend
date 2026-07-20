@@ -11,7 +11,9 @@ use App\Models\Billing;
 use App\Models\Grn;
 use App\Models\MpesaTransaction;
 use App\Models\PaymentVoucher;
+use App\Models\Store;
 use App\Services\Mpesa\MpesaB2bService;
+use App\Services\Mpesa\MpesaBalanceService;
 use App\Services\Mpesa\MpesaService;
 use App\Services\PaymentVoucherService;
 use Illuminate\Http\JsonResponse;
@@ -27,6 +29,7 @@ class MpesaController extends Controller
     public function __construct(
         private readonly MpesaService $service,
         private readonly MpesaB2bService $b2bService,
+        private readonly MpesaBalanceService $balanceService,
         private readonly PaymentVoucherService $voucherService,
     ) {
     }
@@ -122,11 +125,38 @@ class MpesaController extends Controller
             }
         }
 
+        $receiverType = $this->b2bService->normalizeReceiverType($data['receiver_type'] ?? 'mobile_wallet');
+        $preflightVoucher = PaymentVoucher::query()
+            ->with(['store', 'supplier', 'grn'])
+            ->findOrFail((int) $data['voucher_id']);
+
+        $this->voucherService->authorizeStoreAccess($user, $preflightVoucher->store_id);
+
+        $totalRequiredFloat = round((float) $data['amount'], 2) + round((float) ($data['transaction_fee'] ?? 0), 2);
+        $preflight = $this->balanceService->prepareBalanceForPayout($preflightVoucher->store, $totalRequiredFloat, [
+            'voucher_id' => $preflightVoucher->payment_voucher_id,
+            'requested_by_user_id' => $user?->user_id,
+            'receiver_type' => $receiverType,
+            'amount' => round((float) $data['amount'], 2),
+            'transaction_fee' => round((float) ($data['transaction_fee'] ?? 0), 2),
+        ]);
+
+        if (!($preflight['ok'] ?? false)) {
+            return response()->json([
+                'message' => $preflight['message'] ?? 'M-Pesa balance preflight failed.',
+                'data' => [
+                    'reason' => $preflight['reason'] ?? null,
+                    'balance' => $preflight['balance'] ?? null,
+                    'required_amount' => $totalRequiredFloat,
+                ],
+            ], (int) ($preflight['http_status'] ?? 409));
+        }
+
         $voucher = null;
         $txn = null;
 
         try {
-            [$voucher, $txn, $normalizedPhone, $previousStatus] = DB::transaction(function () use ($data, $user) {
+            [$voucher, $txn, $resolvedTarget, $previousStatus] = DB::transaction(function () use ($data, $user, $receiverType) {
                 $voucher = PaymentVoucher::query()
                     ->with(['store', 'supplier', 'grn'])
                     ->lockForUpdate()
@@ -154,8 +184,19 @@ class MpesaController extends Controller
                     throw new \RuntimeException('Requested amount exceeds outstanding voucher balance.');
                 }
 
-                $rawPhone = (string) ($data['phone'] ?? $data['phone_number'] ?? '');
-                $normalizedPhone = $this->b2bService->normalizePhoneNumber($rawPhone);
+                $resolvedTarget = [
+                    'phone_number' => null,
+                    'recipient_shortcode' => null,
+                ];
+
+                if ($receiverType === 'mobile_wallet') {
+                    $rawPhone = (string) ($data['phone'] ?? $data['phone_number'] ?? $voucher->supplier?->phone ?? '');
+                    $resolvedTarget['phone_number'] = $this->b2bService->normalizePhoneNumber($rawPhone);
+                } else {
+                    $rawShortcode = (string) ($data['recipient_shortcode'] ?? $voucher->payment_account ?? $voucher->store?->mpesa_shortcode ?? '');
+                    $resolvedTarget['recipient_shortcode'] = $this->b2bService->normalizeShortcode($rawShortcode);
+                }
+
                 $accountReference = trim((string) (($data['account_reference'] ?? null) ?: ($voucher->voucher_number ?: ('PV-' . $voucher->payment_voucher_id . '-' . Str::upper(Str::random(6))))));
                 $previousStatus = $currentStatus;
 
@@ -168,11 +209,12 @@ class MpesaController extends Controller
                     'grn_id' => $voucher->grn_id,
                     'payment_voucher_id' => $voucher->payment_voucher_id,
                     'user_id' => $user->user_id,
-                    'channel' => 'b2c',
-                    'shortcode_type' => null,
-                    'receiver_type' => 'mobile_wallet',
+                    'channel' => $receiverType === 'mobile_wallet' ? 'b2c' : 'b2b',
+                    'shortcode_type' => $receiverType === 'mobile_wallet' ? null : $receiverType,
+                    'receiver_type' => $receiverType,
                     'amount' => $amount,
-                    'phone_number' => $normalizedPhone,
+                    'phone_number' => $resolvedTarget['phone_number'],
+                    'vendor_shortcode' => $resolvedTarget['recipient_shortcode'],
                     'account_reference' => $accountReference,
                     'transaction_desc' => trim((string) ($data['remarks'] ?? ('Supplier settlement for voucher ' . ($voucher->voucher_number ?: $voucher->payment_voucher_id)))),
                     'status' => 'pending',
@@ -180,19 +222,23 @@ class MpesaController extends Controller
                     'request_payload' => [
                         'voucher_id' => $voucher->payment_voucher_id,
                         'payment_method' => 'mpesa',
-                        'phone_number' => $normalizedPhone,
+                        'receiver_type' => $receiverType,
+                        'phone_number' => $resolvedTarget['phone_number'],
+                        'recipient_shortcode' => $resolvedTarget['recipient_shortcode'],
                         'previous_voucher_status' => $previousStatus,
                         'supporting_document_name' => $data['supporting_document_name'] ?? null,
                         'transaction_fee' => round((float) ($data['transaction_fee'] ?? 0), 2),
                     ],
                 ]);
 
-                return [$voucher, $txn, $normalizedPhone, $previousStatus];
+                return [$voucher, $txn, $resolvedTarget, $previousStatus];
             });
 
             $dispatch = $this->b2bService->initiate($voucher->store, [
                 'amount' => (float) $txn->amount,
-                'phone_number' => $normalizedPhone,
+                'receiver_type' => $receiverType,
+                'phone_number' => $resolvedTarget['phone_number'],
+                'recipient_shortcode' => $resolvedTarget['recipient_shortcode'],
                 'account_reference' => $txn->account_reference,
                 'remarks' => $txn->transaction_desc,
                 'occasion' => $voucher->voucher_number ?: $txn->account_reference,
@@ -202,30 +248,36 @@ class MpesaController extends Controller
             $daraja = $dispatch['response'] ?? [];
             $txn->update([
                 'status' => 'sent',
-                'phone_number' => $dispatch['normalized_phone'] ?? $normalizedPhone,
+                'phone_number' => $dispatch['normalized_phone'] ?? $resolvedTarget['phone_number'],
+                'vendor_shortcode' => $dispatch['normalized_shortcode'] ?? $resolvedTarget['recipient_shortcode'],
                 'originator_conversation_id' => data_get($daraja, 'OriginatorConversationID'),
                 'conversation_id' => data_get($daraja, 'ConversationID'),
                 'result_desc' => data_get($daraja, 'ResponseDescription'),
                 'request_payload' => [
                     ...($txn->request_payload ?? []),
-                    'b2c_request' => $dispatch['request_payload'] ?? [],
-                    'b2c_response' => $daraja,
+                    'receiver_type' => $receiverType,
+                    'b2x_request' => $dispatch['request_payload'] ?? [],
+                    'b2x_response' => $daraja,
                     'previous_voucher_status' => $previousStatus,
                 ],
             ]);
 
             return response()->json([
-                'message' => 'Supplier M-Pesa payout request accepted and is awaiting Safaricom callback.',
+                'message' => $receiverType === 'mobile_wallet'
+                    ? 'Supplier M-Pesa phone payout request accepted and is awaiting Safaricom callback.'
+                    : 'Supplier M-Pesa Till / PayBill payout request accepted and is awaiting Safaricom callback.',
                 'data' => [
                     'mpesa_transaction_id' => $txn->mpesa_transaction_id,
                     'voucher_id' => $voucher->payment_voucher_id,
                     'status' => $txn->status,
+                    'receiver_type' => $receiverType,
                     'tracking_reference' => $txn->originator_conversation_id ?: $txn->account_reference,
                     'originator_conversation_id' => $txn->originator_conversation_id,
                     'conversation_id' => $txn->conversation_id,
                     'account_reference' => $txn->account_reference,
                     'amount' => (float) $txn->amount,
                     'phone_number' => $txn->phone_number,
+                    'recipient_shortcode' => $txn->vendor_shortcode,
                     'message' => data_get($daraja, 'ResponseDescription', 'Pending supplier payout callback.'),
                 ],
             ], 202);
@@ -261,6 +313,41 @@ class MpesaController extends Controller
                 'message' => $e->getMessage(),
             ], 422);
         }
+    }
+
+    public function latestAccountBalance(Request $request): JsonResponse
+    {
+        if ($error = $this->authorizePermission('payments.charge')) return $error;
+
+        $store = $this->resolveBalanceStoreContext($request);
+        $this->voucherService->authorizeStoreAccess($request->user(), $store->store_id);
+
+        return response()->json([
+            'message' => 'Latest M-Pesa account balance snapshot retrieved.',
+            'data' => $this->balanceService->serializeBalance($this->balanceService->latestForStore($store)),
+        ]);
+    }
+
+    public function requestAccountBalance(Request $request): JsonResponse
+    {
+        if ($error = $this->authorizePermission('payments.charge')) return $error;
+
+        $remarks = $request->validate([
+            'remarks' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $store = $this->resolveBalanceStoreContext($request);
+        $this->voucherService->authorizeStoreAccess($request->user(), $store->store_id);
+
+        $balance = $this->balanceService->requestForStore($store, [
+            'requested_by_user_id' => $request->user()?->user_id,
+            'remarks' => $remarks['remarks'] ?? 'Manual M-Pesa account balance refresh from Payment Voucher desk',
+        ]);
+
+        return response()->json([
+            'message' => 'M-Pesa account balance refresh request sent to Safaricom.',
+            'data' => $this->balanceService->serializeBalance($balance),
+        ], 202);
     }
 
     public function status(string $checkoutRequestId): JsonResponse
@@ -413,5 +500,26 @@ class MpesaController extends Controller
             'm-pesa' => 'mpesa',
             default => $safe,
         };
+    }
+
+    private function resolveBalanceStoreContext(Request $request): Store
+    {
+        $data = $request->validate([
+            'store_id' => ['nullable', 'integer', 'exists:stores,store_id'],
+            'voucher_id' => ['nullable', 'integer', 'exists:payment_vouchers,payment_voucher_id'],
+            'payment_voucher_id' => ['nullable', 'integer', 'exists:payment_vouchers,payment_voucher_id'],
+        ]);
+
+        $voucherId = (int) ($data['voucher_id'] ?? $data['payment_voucher_id'] ?? 0);
+        if ($voucherId > 0) {
+            $voucher = PaymentVoucher::query()->with('store')->findOrFail($voucherId);
+            return $voucher->store ?: Store::query()->findOrFail($voucher->store_id);
+        }
+
+        if (!empty($data['store_id'])) {
+            return Store::query()->findOrFail((int) $data['store_id']);
+        }
+
+        abort(422, 'Provide either voucher_id or store_id when requesting account balance.');
     }
 }

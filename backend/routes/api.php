@@ -93,6 +93,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/manual-status/{trackingReference}', [MpesaController::class, 'manualStatus']);
     // Find a recent customer-initiated C2B payment from phone + amount
     Route::post('/pull-match',                   [MpesaController::class, 'pullMatch']);
+    Route::get('/account-balance',               [MpesaController::class, 'latestAccountBalance']);
+    Route::post('/account-balance/request',      [MpesaController::class, 'requestAccountBalance']);
 
     
   });
@@ -213,4 +215,11 @@ Route::prefix('webhooks/mpesa/b2b')
     ->group(function () {
         Route::post('/result',  [MpesaCallbackController::class, 'b2bResult']);
         Route::post('/timeout', [MpesaCallbackController::class, 'b2bTimeout']);
+    });
+
+Route::prefix('webhooks/mpesa/balance')
+    ->middleware('mpesa.callback')
+    ->group(function () {
+        Route::post('/result',  [MpesaCallbackController::class, 'balanceResult']);
+        Route::post('/timeout', [MpesaCallbackController::class, 'balanceTimeout']);
     });

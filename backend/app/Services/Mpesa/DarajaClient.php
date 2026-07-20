@@ -205,6 +205,45 @@ class DarajaClient
 
         return $response->json() ?? [];
     }
+    // ─────────────────────────────────────────────────────────────
+    //  Account Balance — utility/working float preflight
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * @param array $args {
+     *   initiator: string,
+     *   security_credential: string,
+     *   shortcode: string,
+     *   identifier_type: string,
+     *   result_url: string,
+     *   timeout_url: string,
+     *   remarks?: string,
+     * }
+     */
+public function accountBalance(array $args): array
+{
+    $response = $this->authedRequest()->post($this->endpoint('balance'), [
+        'Initiator'          => $args['initiator'],
+        'SecurityCredential' => $args['security_credential'],
+        'CommandID'          => 'AccountBalance',
+        'PartyA'             => $args['shortcode'],
+        'IdentifierType'     => $args['identifier_type'],
+        'Remarks'            => substr((string) ($args['remarks'] ?? 'Account balance query'), 0, 100),
+        'QueueTimeOutURL'    => $args['timeout_url'],
+        'ResultURL'          => $args['result_url'],
+    ]);
+
+    $this->logIfDebug('account_balance', ['req' => $args, 'res' => $response->json()]);
+
+    $json = $response->json() ?? [];
+    if (!$response->ok() || ($json['ResponseCode'] ?? '1') !== '0') {
+        throw new RuntimeException(
+            'Account Balance request rejected: ' . ($json['errorMessage'] ?? $json['ResponseDescription'] ?? $response->body())
+        );
+    }
+
+    return $json;
+}
 
     public function registerPullTransactions(
         string $nominatedNumber,
