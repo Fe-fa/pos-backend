@@ -16,23 +16,6 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use RuntimeException;
-
-/**
- * MpesaService — orchestrates the M-Pesa payment lifecycle.
- *
- * Public API:
- *   - initiateStkPush(Billing, User, phone, amount) : MpesaTransaction
- *   - handleStkCallback(array payload) : MpesaTransaction
- *   - handleC2bConfirmation(array payload) : MpesaTransaction
- *   - status(string checkoutRequestId) : array
- *   - validateManualReceipt(string receipt, Billing, User, amount) : MpesaTransaction
- *
- * Double-charge prevention:
- *   Every initiate call takes a Redis/DB lock on `mpesa:lock:billing:{id}`.
- *   If a pending transaction already exists for that billing within the
- *   idempotency TTL, we RETURN THAT EXISTING TRANSACTION instead of pushing
- *   again — so the cashier hitting "Charge" twice never triggers two STKs.
- */
 class MpesaService
 {
     public function __construct(
@@ -1343,4 +1326,99 @@ if ($resultCode === 0 && ($transactionStatus === '' || in_array($transactionStat
             return null;
         }
     }
+    private function reversalResultUrl(array $creds): string
+{
+    $base = rtrim($creds['callback_base_url'] ?: config('app.url'), '/');
+    $secret = $creds['callback_shared_secret'];
+    $url = $base . '/api/mpesa/callbacks/reversal/result';
+    return $secret ? $url . '?token=' . urlencode($secret) : $url;
+}
+
+private function reversalTimeoutUrl(array $creds): string
+{
+    $base = rtrim($creds['callback_base_url'] ?: config('app.url'), '/');
+    $secret = $creds['callback_shared_secret'];
+    $url = $base . '/api/mpesa/callbacks/reversal/timeout';
+    return $secret ? $url . '?token=' . urlencode($secret) : $url;
+}
+public function initiateReversalForPayment(Payment $payment, User $user, array $data = []): array
+{
+    $payment->loadMissing('billing.store');
+
+    if (strtolower((string) $payment->payment_method) !== 'mpesa') {
+        throw new RuntimeException('Only M-Pesa payments can be reversed.');
+    }
+    if (blank($payment->mpesa_receipt)) {
+        throw new RuntimeException('This payment has no M-Pesa receipt code.');
+    }
+
+    $store = $payment->billing?->store;
+    if (!$store) {
+        throw new RuntimeException('Store context is missing for this payment reversal.');
+    }
+
+    $creds = $this->resolveCredentialsForStore($store);
+    $client = new DarajaClient($creds);
+
+    $initiator = trim((string) (config('mpesa.reversal.initiator_name') ?: $creds['transaction_status_initiator'] ?? ''));
+    $securityCredential = trim((string) (config('mpesa.reversal.security_credential') ?: $creds['transaction_status_security_credential'] ?? ''));
+
+    if ($initiator === '' || $securityCredential === '') {
+        throw new RuntimeException('Reversal initiator or security credential is not configured.');
+    }
+
+    return $client->transactionReversal([
+        'initiator' => $initiator,
+        'security_credential' => $securityCredential,
+        'transaction_id' => $payment->mpesa_receipt,
+        'amount' => (float) $payment->amount_received,
+        'receiver_party' => $creds['shortcode'],
+        'receiver_identifier_type' => '11',
+        'result_url' => $this->reversalResultUrl($creds),
+        'timeout_url' => $this->reversalTimeoutUrl($creds),
+        'remarks' => blank($data['remarks'] ?? null) ? 'Customer requested POS reversal' : trim((string) $data['remarks']),
+        'occasion' => trim((string) ($data['occasion'] ?? ('REV-PAY-' . $payment->payment_id))),
+    ]);
+}
+
+public function handleReversalResult(array $payload): ?Payment
+{
+    $originator = (string) data_get($payload, 'Result.OriginatorConversationID', '');
+    $conversation = (string) data_get($payload, 'Result.ConversationID', '');
+
+    $payment = Payment::query()
+        ->where('payment_meta->reversal->originator_conversation_id', $originator)
+        ->orWhere('payment_meta->reversal->conversation_id', $conversation)
+        ->latest('payment_id')
+        ->first();
+
+    if (!$payment) {
+        Log::warning('[Mpesa] Reversal callback did not match any payment', $payload);
+        return null;
+    }
+
+    $success = (int) data_get($payload, 'Result.ResultCode', 1) === 0;
+    return $this->paymentService->finalizeMpesaReversal($payment, $payload, $success);
+}
+
+public function handleReversalTimeout(array $payload): ?Payment
+{
+    $originator = (string) (data_get($payload, 'Result.OriginatorConversationID')
+        ?? data_get($payload, 'OriginatorConversationID')
+        ?? data_get($payload, 'ConversationID')
+        ?? '');
+
+    $payment = Payment::query()
+        ->where('payment_meta->reversal->originator_conversation_id', $originator)
+        ->orWhere('payment_meta->reversal->conversation_id', $originator)
+        ->latest('payment_id')
+        ->first();
+
+    if (!$payment) {
+        Log::warning('[Mpesa] Reversal timeout callback did not match any payment', $payload);
+        return null;
+    }
+
+    return $this->paymentService->finalizeMpesaReversal($payment, $payload, false);
+}
 }

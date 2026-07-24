@@ -334,4 +334,29 @@ public function accountBalance(array $args): array
             Log::channel('daily')->debug("[Daraja::{$event}]", $ctx);
         }
     }
+    public function transactionReversal(array $args): array
+{
+    $response = $this->authedRequest()->post($this->endpoint('reversal'), [
+        'Initiator' => $args['initiator'],
+        'SecurityCredential' => $args['security_credential'],
+        'CommandID' => 'TransactionReversal',
+        'TransactionID' => $args['transaction_id'],
+        'Amount' => (int) round($args['amount']),
+        'ReceiverParty' => $args['receiver_party'] ?? $this->creds['shortcode'],
+        'RecieverIdentifierType' => $args['receiver_identifier_type'] ?? '11',
+        'ResultURL' => $args['result_url'],
+        'QueueTimeOutURL' => $args['timeout_url'],
+        'Remarks' => substr(blank($args['remarks'] ?? null) ? 'POS reversal' : (string) $args['remarks'], 0, 100),
+        'Occasion' => substr(blank($args['occasion'] ?? null) ? 'POSReversal' : (string) $args['occasion'], 0, 100),
+    ]);
+
+    $json = $response->json() ?? [];
+    if (!$response->ok() || ($json['ResponseCode'] ?? '1') !== '0') {
+        throw new RuntimeException(
+            'Reversal request rejected: ' . ($json['errorMessage'] ?? $json['ResponseDescription'] ?? $response->body())
+        );
+    }
+
+    return $json;
+}
 }

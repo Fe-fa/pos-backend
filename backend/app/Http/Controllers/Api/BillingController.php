@@ -57,7 +57,12 @@ class BillingController extends Controller
                 'customer:customer_id,full_name,email,phone',
                 'store:store_id,store_name',
                 'user:user_id,first_name,last_name,email',
-                'payments:payment_id,billing_id,amount_received,payment_method,payment_date,receiptnumber',
+                // NOTE: status, mpesa_receipt, and payment_meta are required by the
+                // frontend's M-Pesa reversal eligibility check (HistoryModal.jsx /
+                // CashierPosPage.jsx getReversibleMpesaPayment). Without them, every
+                // payment silently fails that check and the "Request Reversal" /
+                // "Refund" button never renders, regardless of permissions.
+                'payments:payment_id,billing_id,amount_received,payment_method,payment_date,receiptnumber,status,mpesa_receipt,mpesa_phone,payment_meta',
             ])
             ->withCount('items')
             ->withSum('items', 'quantity');
@@ -204,37 +209,44 @@ if ($isSearchRequest) {
             }
         }
 
-        if ($phone !== '') {
-            $webhook = config('services.whatsapp.receipts_webhook') ?: env('WHATSAPP_RECEIPTS_WEBHOOK');
+if ($phone !== '') {
+    $token = config('services.whatsapp.token');
+    $phoneNumberId = config('services.whatsapp.phone_number_id');
 
-            if ($webhook) {
-                try {
-                    $response = Http::timeout(8)->acceptJson()->post($webhook, [
-                        'phone' => $phone,
-                        'message' => "{$documentLabel} from {$storeName}: {$viewUrl}",
-                        'document_url' => $downloadUrl,
-                        'view_url' => $viewUrl,
-                        'billing_id' => $billing->billing_id,
-                        'mode' => $mode,
-                    ]);
+    if ($token && $phoneNumberId) {
+        try {
+            $waPhone = preg_replace('/[^0-9]/', '', $phone); // digits only, e.g. 2547XXXXXXXX
 
-                    if ($response->successful()) {
-                        $channels['whatsapp'] = 'queued';
-                    } else {
-                        $channels['whatsapp'] = 'failed';
-                        $channelErrors['whatsapp'] = $response->json('message')
-                            ?: trim((string) $response->body())
-                            ?: "WhatsApp webhook responded with HTTP {$response->status()}";
-                    }
-                } catch (\Throwable $exception) {
-                    $channels['whatsapp'] = 'failed';
-                    $channelErrors['whatsapp'] = $exception->getMessage();
-                }
+            $response = Http::withToken($token)
+                ->timeout(8)
+                ->acceptJson()
+                ->post("https://graph.facebook.com/v20.0/{$phoneNumberId}/messages", [
+                    'messaging_product' => 'whatsapp',
+                    'to' => $waPhone,
+                    'type' => 'text',
+                    'text' => [
+                        'preview_url' => true,
+                        'body' => "Hello {$customerName},\n\nYour {$documentLabel} from {$storeName} is ready.\n\nView: {$viewUrl}\nDownload: {$downloadUrl}",
+                    ],
+                ]);
+
+            if ($response->successful()) {
+                $channels['whatsapp'] = 'sent';
             } else {
-                $channels['whatsapp'] = 'not_configured';
-                $channelErrors['whatsapp'] = 'WHATSAPP_RECEIPTS_WEBHOOK is not configured.';
+                $channels['whatsapp'] = 'failed';
+                $channelErrors['whatsapp'] = $response->json('error.message')
+                    ?: trim((string) $response->body())
+                    ?: "WhatsApp API responded with HTTP {$response->status()}";
             }
+        } catch (\Throwable $exception) {
+            $channels['whatsapp'] = 'failed';
+            $channelErrors['whatsapp'] = $exception->getMessage();
         }
+    } else {
+        $channels['whatsapp'] = 'not_configured';
+        $channelErrors['whatsapp'] = 'WhatsApp Cloud API credentials are not configured.';
+    }
+}
 
         return response()->json([
             'message' => 'Digital document dispatch processed successfully.',

@@ -20,7 +20,8 @@ class UpdateStoreRequest extends FormRequest
             'store_name' => ['sometimes', 'required', 'string', 'max:255'],
             'location' => ['sometimes', 'required', 'string', 'max:255'],
             'currency' => ['sometimes', 'required', 'string', 'max:10'],
-            'logo_url' => ['nullable', 'url', 'max:2048'],
+            'logo' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp,gif', 'max:2048'],
+            'remove_logo' => ['nullable', 'boolean'],
             'telephone' => ['nullable', 'string', 'max:50'],
             'pin' => ['nullable', 'string', 'max:50'],
             'physical_address' => ['nullable', 'string', 'max:1000'],
@@ -32,7 +33,6 @@ class UpdateStoreRequest extends FormRequest
             'mpesa_shortcode_type' => ['nullable', Rule::in(['paybill', 'till'])],
             'mpesa_shortcode' => ['nullable', 'string', 'max:20'],
             'mpesa_till_number' => ['nullable', 'string', 'max:20'],
-            // Left blank in the form to keep the currently stored secret.
             'mpesa_consumer_key' => ['nullable', 'string', 'max:500'],
             'mpesa_consumer_secret' => ['nullable', 'string', 'max:500'],
             'mpesa_passkey' => ['nullable', 'string', 'max:500'],

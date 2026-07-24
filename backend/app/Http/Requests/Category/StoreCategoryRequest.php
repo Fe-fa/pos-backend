@@ -23,6 +23,7 @@ class StoreCategoryRequest extends FormRequest
                 Rule::unique('categories', 'category_name')
                     ->where(fn ($q) => $q->where('store_id', $this->input('store_id'))),
             ],
+            'description' => ['nullable', 'string', 'max:1000'],
         ];
     }
 

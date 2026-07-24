@@ -6,6 +6,7 @@ use App\Http\Controllers\Concerns\AuthorizesPermission;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Payment\ChargeBillingRequest;
 use App\Http\Requests\Payment\ChargeCartRequest;
+use App\Http\Requests\Payment\ChequeLifecycleRequest;
 use App\Models\Billing;
 use App\Models\Payment;
 use App\Services\PaymentService;
@@ -33,16 +34,17 @@ class PaymentController extends Controller
         $profitabilityByBilling = $this->profitabilityByBillingSubquery();
 
         $payments = (clone $filteredPayments)
+            ->leftJoin('billing', 'billing.billing_id', '=', 'payments.billing_id')
             ->leftJoinSub($profitabilityByBilling, 'billing_profit', function ($join) {
                 $join->on('billing_profit.billing_id', '=', 'payments.billing_id');
             })
             ->select('payments.*')
-            ->selectRaw('COALESCE(billing_profit.gross_sales, 0) as gross_sales_total')
-            ->selectRaw('COALESCE(billing_profit.cost_of_goods, 0) as cost_of_goods_total')
-            ->selectRaw('COALESCE(billing_profit.gross_profit_total, 0) as gross_profit_total')
-            ->selectRaw('COALESCE(billing_profit.units_sold, 0) as profit_units_sold')
+            ->selectRaw("CASE WHEN LOWER(COALESCE(billing.status, '')) = 'paid' AND LOWER(COALESCE(payments.status, '')) = 'paid' AND COALESCE(payments.balance_after, 0) <= 0 THEN COALESCE(billing_profit.gross_sales, 0) ELSE 0 END as gross_sales_total")
+            ->selectRaw("CASE WHEN LOWER(COALESCE(billing.status, '')) = 'paid' AND LOWER(COALESCE(payments.status, '')) = 'paid' AND COALESCE(payments.balance_after, 0) <= 0 THEN COALESCE(billing_profit.cost_of_goods, 0) ELSE 0 END as cost_of_goods_total")
+            ->selectRaw("CASE WHEN LOWER(COALESCE(billing.status, '')) = 'paid' AND LOWER(COALESCE(payments.status, '')) = 'paid' AND COALESCE(payments.balance_after, 0) <= 0 THEN COALESCE(billing_profit.gross_profit_total, 0) ELSE 0 END as gross_profit_total")
+            ->selectRaw("CASE WHEN LOWER(COALESCE(billing.status, '')) = 'paid' AND LOWER(COALESCE(payments.status, '')) = 'paid' AND COALESCE(payments.balance_after, 0) <= 0 THEN COALESCE(billing_profit.units_sold, 0) ELSE 0 END as profit_units_sold")
             ->with([
-                'billing:billing_id,uuid,invnumber,customer_id,store_id,user_id,total,vat_amount,balance_due,points_discount,notes,created_at',
+                'billing:billing_id,uuid,invnumber,customer_id,store_id,user_id,total,vat_amount,balance_due,points_discount,notes,status,created_at',
                 'billing.customer:customer_id,full_name,email,phone',
                 'billing.store:store_id,store_name,currency',
                 'billing.user:user_id,first_name,last_name,email',
@@ -130,6 +132,14 @@ class PaymentController extends Controller
                     'mpesa_mode' => $row['mpesa_mode'] ?? null,
                     'card_reference' => $row['card_reference'] ?? null,
                     'card_holder' => $row['card_holder'] ?? null,
+                    'cheque_bank_name' => $row['cheque_bank_name'] ?? null,
+                    'cheque_bank_code' => $row['cheque_bank_code'] ?? null,
+                    'cheque_number' => $row['cheque_number'] ?? null,
+                    'cheque_date' => $row['cheque_date'] ?? null,
+                    'cheque_account_name' => $row['cheque_account_name'] ?? null,
+                    'cheque_account_number' => $row['cheque_account_number'] ?? null,
+                    'cheque_branch_name' => $row['cheque_branch_name'] ?? null,
+                    'cheque_notes' => $row['cheque_notes'] ?? null,
                 ];
             }, $payment['allocations']);
         } else {
@@ -144,6 +154,14 @@ class PaymentController extends Controller
                 'mpesa_code' => $payment['mpesa_code'] ?? null,
                 'card_reference' => $payment['card_reference'] ?? null,
                 'card_holder' => $payment['card_holder'] ?? null,
+                'cheque_bank_name' => $payment['cheque_bank_name'] ?? null,
+                'cheque_bank_code' => $payment['cheque_bank_code'] ?? null,
+                'cheque_number' => $payment['cheque_number'] ?? null,
+                'cheque_date' => $payment['cheque_date'] ?? null,
+                'cheque_account_name' => $payment['cheque_account_name'] ?? null,
+                'cheque_account_number' => $payment['cheque_account_number'] ?? null,
+                'cheque_branch_name' => $payment['cheque_branch_name'] ?? null,
+                'cheque_notes' => $payment['cheque_notes'] ?? null,
             ];
         }
 
@@ -154,6 +172,135 @@ class PaymentController extends Controller
             'data' => $result,
         ], 201);
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Cheque lifecycle endpoints (fix for /api/payments/{id}/cheque/* 404s)
+    // ──────────────────────────────────────────────────────────────────────
+
+    public function chequeBanks(Request $request): JsonResponse
+    {
+        if ($error = $this->authorizePermission('payments.view')) {
+            return $error;
+        }
+
+        return response()->json([
+            'message' => 'Cheque bank directory loaded.',
+            'data' => $this->service->chequeBanks(),
+        ]);
+    }
+
+    public function authorizeCheque(ChequeLifecycleRequest $request, string $paymentRef): JsonResponse
+    {
+        if ($error = $this->authorizePermission('payments.charge')) {
+            return $error;
+        }
+
+        $payment = $this->resolveChequePayment($paymentRef);
+
+        return response()->json([
+            'message' => 'Cheque authorized successfully.',
+            'data' => $this->service->authorizeCheque($payment, $request->user(), array_merge($request->validated(), ['transition_ip' => $request->ip()])),
+        ]);
+    }
+
+    public function verifyCheque(ChequeLifecycleRequest $request, string $paymentRef): JsonResponse
+    {
+        if ($error = $this->authorizePermission('payments.charge')) {
+            return $error;
+        }
+
+        $payment = $this->resolveChequePayment($paymentRef);
+
+        return response()->json([
+            'message' => 'Cheque verified successfully.',
+            'data' => $this->service->verifyCheque($payment, $request->user(), array_merge($request->validated(), ['transition_ip' => $request->ip()])),
+        ]);
+    }
+
+    public function submitCheque(ChequeLifecycleRequest $request, string $paymentRef): JsonResponse
+    {
+        if ($error = $this->authorizePermission('payments.charge')) {
+            return $error;
+        }
+
+        $payment = $this->resolveChequePayment($paymentRef);
+
+        return response()->json([
+            'message' => 'Cheque submitted successfully.',
+            'data' => $this->service->submitCheque($payment, $request->user(), array_merge($request->validated(), ['transition_ip' => $request->ip()])),
+        ]);
+    }
+
+    public function depositCheque(ChequeLifecycleRequest $request, string $paymentRef): JsonResponse
+    {
+        if ($error = $this->authorizePermission('payments.charge')) {
+            return $error;
+        }
+
+        $payment = $this->resolveChequePayment($paymentRef);
+
+        return response()->json([
+            'message' => 'Cheque deposit recorded successfully.',
+            'data' => $this->service->depositCheque($payment, $request->user(), array_merge($request->validated(), ['transition_ip' => $request->ip()])),
+        ]);
+    }
+
+    public function clearCheque(ChequeLifecycleRequest $request, string $paymentRef): JsonResponse
+    {
+        if ($error = $this->authorizePermission('payments.charge')) {
+            return $error;
+        }
+
+        $payment = $this->resolveChequePayment($paymentRef);
+
+        return response()->json([
+            'message' => 'Cheque cleared successfully.',
+            'data' => $this->service->clearCheque($payment, $request->user(), array_merge($request->validated(), ['transition_ip' => $request->ip()])),
+        ]);
+    }
+
+    public function returnCheque(ChequeLifecycleRequest $request, string $paymentRef): JsonResponse
+    {
+        if ($error = $this->authorizePermission('payments.charge')) {
+            return $error;
+        }
+
+        $payment = $this->resolveChequePayment($paymentRef);
+
+        return response()->json([
+            'message' => 'Cheque return recorded successfully.',
+            'data' => $this->service->returnCheque($payment, $request->user(), array_merge($request->validated(), ['transition_ip' => $request->ip()])),
+        ]);
+    }
+
+
+    private function resolveChequePayment(string $paymentRef): Payment
+    {
+        $payment = Payment::query()
+            ->where('payment_id', $paymentRef)
+            ->orWhere('uuid', $paymentRef)
+            ->orWhere('receiptnumber', $paymentRef)
+            ->first();
+
+        if (!$payment && is_numeric($paymentRef)) {
+            $payment = Payment::query()
+                ->where('billing_id', (int) $paymentRef)
+                ->where('payment_method', 'cheque')
+                ->orderByDesc('payment_id')
+                ->first();
+        }
+
+        if (!$payment) {
+            abort(response()->json([
+                'message' => 'Cheque payment not found for the provided reference.',
+                'payment_reference' => $paymentRef,
+            ], 404));
+        }
+
+        return $payment;
+    }
+
+    // ── private helpers (unchanged) ──────────────────────────────────────
 
     private function applyLedgerFilters(Builder $query, Request $request): Builder
     {
@@ -166,9 +313,7 @@ class PaymentController extends Controller
                 )
             )
             ->when($request->filled('status'), fn (Builder $q) =>
-                $q->whereHas('billing', fn (Builder $billing) =>
-                    $billing->where('billing.status', $request->status)
-                )
+                $q->where('payments.status', $request->status)
             )
             ->when($request->filled('payment_method'), fn (Builder $q) =>
                 $q->where('payments.payment_method', $request->payment_method)
@@ -237,6 +382,8 @@ class PaymentController extends Controller
             ->first();
 
         $filteredBillingIds = (clone $filteredPayments)
+            ->join('billing', 'billing.billing_id', '=', 'payments.billing_id')
+            ->where('billing.status', 'paid')
             ->select('payments.billing_id')
             ->distinct();
 
@@ -275,4 +422,85 @@ class PaymentController extends Controller
             'billed_transactions' => (int) ($profitabilitySummary->billed_transactions ?? 0),
         ];
     }
+
+    public function reversalQueue(Request $request): JsonResponse
+{
+    if ($error = $this->authorizePermission('payments.manage')) {
+        return $error;
+    }
+
+    $query = Payment::query()
+        ->where('payment_method', 'mpesa')
+        ->where('payment_meta->reversal->status', 'pending_approval')
+        ->with([
+            'billing:billing_id,uuid,invnumber,customer_id,store_id,user_id,total,balance_due,status,created_at',
+            'billing.customer:customer_id,full_name,email,phone',
+            'billing.store:store_id,store_name,currency',
+            'billing.user:user_id,first_name,last_name,email',
+        ])
+        ->orderByDesc('payment_id');
+
+    if ($request->filled('store_id')) {
+        $query->whereHas('billing', fn (Builder $billing) =>
+            $billing->where('billing.store_id', (int) $request->store_id)
+        );
+    }
+
+    $rows = $query->limit(max(1, min((int) $request->integer('limit', 25), 100)))->get();
+
+    return response()->json([
+        'data' => $rows,
+        'meta' => ['count' => $rows->count()],
+    ]);
+}
+
+public function requestMpesaReversal(Request $request, Payment $payment): JsonResponse
+{
+    if ($error = $this->authorizePermission('pos.refund')) {
+        return $error;
+    }
+
+    $validated = $request->validate([
+        'reason' => ['required', 'string', 'max:255'],
+        'remarks' => ['nullable', 'string', 'max:1000'],
+    ]);
+
+    return response()->json([
+        'message' => 'M-Pesa reversal request submitted for approval.',
+        'data' => $this->service->requestMpesaReversal($payment, $request->user(), $validated),
+    ]);
+}
+
+public function approveMpesaReversal(Request $request, Payment $payment): JsonResponse
+{
+    if ($error = $this->authorizePermission('payments.manage')) {
+        return $error;
+    }
+
+    $validated = $request->validate([
+        'remarks' => ['nullable', 'string', 'max:1000'],
+    ]);
+
+    return response()->json([
+        'message' => 'M-Pesa reversal approved and sent to Safaricom.',
+        'data' => $this->service->approveMpesaReversal($payment, $request->user(), $validated),
+    ]);
+}
+
+public function rejectMpesaReversal(Request $request, Payment $payment): JsonResponse
+{
+    if ($error = $this->authorizePermission('payments.manage')) {
+        return $error;
+    }
+
+    $validated = $request->validate([
+        'reason' => ['required', 'string', 'max:255'],
+        'remarks' => ['nullable', 'string', 'max:1000'],
+    ]);
+
+    return response()->json([
+        'message' => 'M-Pesa reversal request rejected.',
+        'data' => $this->service->rejectMpesaReversal($payment, $request->user(), $validated),
+    ]);
+}
 }

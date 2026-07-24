@@ -29,6 +29,7 @@ class UpdateCategoryRequest extends FormRequest
                     ->where(fn ($q) => $q->where('store_id', $storeId))
                     ->ignore($categoryId, 'category_id'),
             ],
+            'description' => ['nullable', 'string', 'max:1000'],
         ];
     }
 }

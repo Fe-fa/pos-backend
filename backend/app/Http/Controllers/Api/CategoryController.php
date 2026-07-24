@@ -35,6 +35,7 @@ class CategoryController extends Controller
                 'category_id',
                 'store_id',
                 'category_name',
+                'description',
             ])
             ->withCount('products');
 

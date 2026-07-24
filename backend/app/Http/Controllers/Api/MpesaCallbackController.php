@@ -182,4 +182,38 @@ class MpesaCallbackController extends Controller
     {
         return response()->json(['ResultCode' => 0, 'ResultDesc' => $message]);
     }
+
+    public function reversalResult(Request $request): JsonResponse
+{
+    if ($request->attributes->get('mpesa_untrusted')) {
+        return $this->ack('Accepted');
+    }
+
+    try {
+        $payload = $request->all();
+        Log::info('[Mpesa] Reversal result callback received', $payload);
+        $this->service->handleReversalResult($payload);
+    } catch (\Throwable $e) {
+        Log::error('[Mpesa] Reversal result callback error', ['error' => $e->getMessage()]);
+    }
+
+    return $this->ack('Accepted');
+}
+
+public function reversalTimeout(Request $request): JsonResponse
+{
+    if ($request->attributes->get('mpesa_untrusted')) {
+        return $this->ack('Accepted');
+    }
+
+    try {
+        $payload = $request->all();
+        Log::warning('[Mpesa] Reversal timeout callback received', $payload);
+        $this->service->handleReversalTimeout($payload);
+    } catch (\Throwable $e) {
+        Log::error('[Mpesa] Reversal timeout callback error', ['error' => $e->getMessage()]);
+    }
+
+    return $this->ack('Accepted');
+}
 }

@@ -44,6 +44,7 @@ class CategoryService
         return Category::create([
             'store_id'      => $data['store_id'],
             'category_name' => $data['category_name'],
+            'description'   => $data['description'] ?? null,
         ])->loadCount('products');
     }
 
@@ -65,6 +66,7 @@ class CategoryService
         $category->update([
             'store_id'      => $data['store_id'] ?? $category->store_id,
             'category_name' => $data['category_name'],
+            'description'   => array_key_exists('description', $data) ? ($data['description'] ?? null) : $category->description,
         ]);
 
         return $category->fresh()->loadCount('products');

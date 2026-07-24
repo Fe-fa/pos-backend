@@ -28,6 +28,7 @@ use App\Http\Controllers\Api\MpesaController;
 use App\Http\Controllers\Api\MpesaRealtimePaymentController;
 use App\Http\Controllers\Api\MpesaCallbackController;
 use App\Http\Controllers\Api\TransactionDeskController;
+use App\Http\Controllers\Api\ChequeReconciliationWebhookController;
 
 
 
@@ -55,8 +56,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/cashier-shifts/open', [CashierShiftController::class, 'open']);
     Route::post('/cashier-shifts/close', [CashierShiftController::class, 'close']);
     Route::get('/cashier-shifts/daily-sales', [CashierShiftController::class, 'dailySales']);
-
-    // Manager / Admin endpoints
     Route::get('/cashier-shifts/all-cashiers', [CashierShiftController::class, 'allCashiers']);
     Route::get('/cashier-shifts/report', [CashierShiftController::class, 'report']);
 
@@ -81,17 +80,11 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/unassigned', [MpesaRealtimePaymentController::class, 'unassignedIndex']);
         Route::post('/unassigned/{unassigned}/apply', [MpesaRealtimePaymentController::class, 'applyUnassigned']);
     });
-    // Push STK to customer's phone
     Route::post('/stk-push',                     [MpesaController::class, 'initiateStkPush']);
-    // Poll status while modal is open
     Route::get ('/status/{checkoutRequestId}',   [MpesaController::class, 'status']);
-    // Cashier cancels an in-flight attempt
     Route::post('/cancel/{checkoutRequestId}',   [MpesaController::class, 'cancel']);
-    // Manual receipt entry
     Route::post('/validate-receipt',             [MpesaController::class, 'validateReceipt']);
-    // Poll async manual receipt validation
     Route::get('/manual-status/{trackingReference}', [MpesaController::class, 'manualStatus']);
-    // Find a recent customer-initiated C2B payment from phone + amount
     Route::post('/pull-match',                   [MpesaController::class, 'pullMatch']);
     Route::get('/account-balance',               [MpesaController::class, 'latestAccountBalance']);
     Route::post('/account-balance/request',      [MpesaController::class, 'requestAccountBalance']);
@@ -100,6 +93,11 @@ Route::middleware('auth:sanctum')->group(function () {
   });
       Route::post('/mpesa/b2b/supplier-payment', [MpesaController::class, 'initiateB2bSupplierPayment']);
     Route::get('/mpesa/b2b/status/{trackingReference}', [MpesaController::class, 'b2bStatus']);
+
+    Route::get('payments/reversal-queue', [PaymentController::class, 'reversalQueue']);
+Route::post('payments/{payment:payment_id}/mpesa-reversal/request', [PaymentController::class, 'requestMpesaReversal']);
+Route::post('payments/{payment:payment_id}/mpesa-reversal/approve', [PaymentController::class, 'approveMpesaReversal']);
+Route::post('payments/{payment:payment_id}/mpesa-reversal/reject', [PaymentController::class, 'rejectMpesaReversal']);
 
     Route::get('/transaction-desk', [TransactionDeskController::class, 'index']);
     Route::post('/transaction-desk/expenses', [TransactionDeskController::class, 'storeExpense']);
@@ -183,7 +181,14 @@ Route::prefix('dashboard/manager')->group(function () {
 
 
         Route::get('payments', [PaymentController::class, 'index'])->name('payments.index');
-      Route::get('payments/{payment:payment_id}', [PaymentController::class, 'show']);
+        Route::get('payments/cheque-banks', [PaymentController::class, 'chequeBanks']);
+        Route::post('payments/{paymentRef}/cheque/authorize', [PaymentController::class, 'authorizeCheque']);
+        Route::post('payments/{paymentRef}/cheque/verify', [PaymentController::class, 'verifyCheque']);
+        Route::post('payments/{paymentRef}/cheque/submit', [PaymentController::class, 'submitCheque']);
+        Route::post('payments/{paymentRef}/cheque/deposit', [PaymentController::class, 'depositCheque']);
+        Route::post('payments/{paymentRef}/cheque/clear', [PaymentController::class, 'clearCheque']);
+        Route::post('payments/{paymentRef}/cheque/return', [PaymentController::class, 'returnCheque']);
+        Route::get('payments/{payment:payment_id}', [PaymentController::class, 'show']);
 
         Route::get('payment-vouchers', [PaymentVoucherController::class, 'index'])->name('payment-vouchers.index');
         Route::post('payment-vouchers', [PaymentVoucherController::class, 'store'])->name('payment-vouchers.store');
@@ -208,6 +213,8 @@ Route::prefix('mpesa/callbacks')
         Route::post('/c2b/confirmation',       [MpesaCallbackController::class, 'c2bConfirmation']);
         Route::post('/tx-status/result',       [MpesaCallbackController::class, 'txStatusResult']);
         Route::post('/tx-status/timeout',      [MpesaCallbackController::class, 'txStatusTimeout']);
+        Route::post('/reversal/result',  [MpesaCallbackController::class, 'reversalResult']);
+Route::post('/reversal/timeout', [MpesaCallbackController::class, 'reversalTimeout']);
     });
 
 Route::prefix('webhooks/mpesa/b2b')
@@ -223,3 +230,4 @@ Route::prefix('webhooks/mpesa/balance')
         Route::post('/result',  [MpesaCallbackController::class, 'balanceResult']);
         Route::post('/timeout', [MpesaCallbackController::class, 'balanceTimeout']);
     });
+Route::post('webhooks/cheques/reconciliation', [ChequeReconciliationWebhookController::class, 'handle']);

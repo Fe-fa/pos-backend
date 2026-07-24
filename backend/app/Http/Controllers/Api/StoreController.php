@@ -11,7 +11,9 @@ use App\Models\DocumentSequence;
 use App\Models\Store;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 
 class StoreController extends Controller
 {
@@ -85,10 +87,17 @@ class StoreController extends Controller
     {
         if ($error = $this->authorizePermission('stores.manage')) return $error;
 
-        $store = Store::create([
-            ...$request->validated(),
-            'settings' => $this->defaultSettings(),
-        ]);
+        $attributes = collect($request->validated())
+            ->except(['logo', 'remove_logo'])
+            ->all();
+
+        $attributes['settings'] = $this->defaultSettings();
+
+        if ($request->hasFile('logo')) {
+            $attributes['logo_url'] = $this->storeLogoFile($request->file('logo'));
+        }
+
+        $store = Store::create($attributes);
 
         return response()->json([
             'message' => 'Store created successfully.',
@@ -115,7 +124,23 @@ class StoreController extends Controller
     {
         if ($error = $this->authorizePermission('stores.manage')) return $error;
 
-        $store->update($request->validated());
+        $attributes = collect($request->validated())
+            ->except(['logo', 'remove_logo'])
+            ->all();
+
+        DB::transaction(function () use ($request, $store, &$attributes) {
+            if ($request->boolean('remove_logo')) {
+                $this->deleteLogoFile($store->logo_url);
+                $attributes['logo_url'] = null;
+            }
+
+            if ($request->hasFile('logo')) {
+                $this->deleteLogoFile($store->logo_url);
+                $attributes['logo_url'] = $this->storeLogoFile($request->file('logo'));
+            }
+
+            $store->update($attributes);
+        });
 
         return response()->json([
             'message' => 'Store updated successfully.',
@@ -333,5 +358,35 @@ class StoreController extends Controller
         }
 
         return $updates;
+    }
+
+    private function storeLogoFile(?UploadedFile $file): ?string
+    {
+        if (! $file) {
+            return null;
+        }
+
+        $path = $file->store('stores/logos', 'public');
+
+        return Storage::disk('public')->url($path);
+    }
+
+    private function deleteLogoFile(?string $logoUrl): void
+    {
+        if (! filled($logoUrl)) {
+            return;
+        }
+
+        $path = parse_url((string) $logoUrl, PHP_URL_PATH);
+        if (! $path || ! str_starts_with($path, '/storage/')) {
+            return;
+        }
+
+        $relativePath = ltrim(substr($path, strlen('/storage/')), '/');
+        if ($relativePath === '') {
+            return;
+        }
+
+        Storage::disk('public')->delete($relativePath);
     }
 }

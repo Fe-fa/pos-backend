@@ -15,6 +15,7 @@ return [
             'b2b'           => 'https://sandbox.safaricom.co.ke/mpesa/b2b/v1/paymentrequest',
             'b2c'           => 'https://sandbox.safaricom.co.ke/mpesa/b2c/v3/paymentrequest',
             'balance'       => 'https://sandbox.safaricom.co.ke/mpesa/accountbalance/v1/query',
+            'reversal'      => 'https://sandbox.safaricom.co.ke/mpesa/reversal/v1/request',
         ],
         'production' => [
             'auth'          => 'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
@@ -27,6 +28,7 @@ return [
             'b2b'           => 'https://api.safaricom.co.ke/mpesa/b2b/v1/paymentrequest',
             'b2c'           => 'https://api.safaricom.co.ke/mpesa/b2c/v3/paymentrequest',
             'balance'       => 'https://api.safaricom.co.ke/mpesa/accountbalance/v1/query',
+            'reversal'      => 'https://api.safaricom.co.ke/mpesa/reversal/v1/request',
         ],
     ],
 
